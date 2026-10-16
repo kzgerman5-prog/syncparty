@@ -36,6 +36,18 @@ function setMode(mode) {
   $('urlError').classList.add('hidden');
 }
 
+function toggleTheme() {
+  const dark = document.documentElement.classList.toggle('theme-dark');
+  try { localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light'); } catch {}
+  const button = $('themeToggle');
+  button.innerHTML = '<i class="fa-solid ' + (dark ? 'fa-sun' : 'fa-moon') + '" aria-hidden="true"></i><span>' + (dark ? 'Light mode' : 'Dark / purple') + '</span>';
+  button.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark purple theme');
+  button.setAttribute('title', dark ? 'Switch to light theme' : 'Switch to dark purple theme');
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#191326' : '#f7f8fc';
+}
+
+try { if (localStorage.getItem('syncparty-theme') === 'dark') toggleTheme(); } catch {}
+
 function normalizeCode(value) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/^PARTY-?/, '').replace(/-/g, '').slice(0, 10);
 }
