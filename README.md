@@ -34,6 +34,8 @@ The upload control accepts video files up to 500 MB. Files are stored in the pub
 
 Hosts can load YouTube links or direct video file URLs supported by the viewer's browser (such as MP4 and WebM). A webpage link from a streaming service is not necessarily a playable video URL: providers that block embedding or do not expose a browser-playable media URL cannot be synced by this static player. Uploaded local files are first sent to the configured Storage bucket, then shared with the room. The host's controls and playback position are broadcast through Supabase Realtime.
 
+The player stays within a 16:9 frame on desktop and mobile. Use its fullscreen button to enter or leave fullscreen. The theme button switches between light and dark mode and remembers the selection. Chat has a fixed height; type `@` and choose a room member to insert a mention. New messages keep the latest view in sight unless you have scrolled up to read older messages.
+
 ## Run and deploy
 
 Serve the folder over HTTP (for example, `python -m http.server 8000`) and open `http://localhost:8000`. GitHub Pages deployment is configured in `.github/workflows/pages.yml`; select GitHub Actions in **Settings → Pages → Build and deployment**.
@@ -42,4 +44,4 @@ Rooms use random 10-character codes. Chat and viewer presence are temporary; the
 
 ## Built with
 
-Vanilla HTML, CSS, and JavaScript; Supabase Realtime and Storage; the YouTube IFrame API; Tailwind CSS and Font Awesome from public CDNs.
+Vanilla HTML, CSS, and JavaScript; Supabase Realtime and Storage; the YouTube IFrame API; Font Awesome from a public CDN.

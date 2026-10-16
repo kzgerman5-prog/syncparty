@@ -17,6 +17,8 @@ const state = {
   lastState: null,
   chatSeen: new Set(),
   bannedSessions: new Set(),
+  mentionCandidates: [],
+  mentionIndex: 0,
   toastTimer: null,
 };
 
@@ -39,12 +41,15 @@ function setMode(mode) {
 
 function toggleTheme() {
   const dark = document.documentElement.classList.toggle('theme-dark');
-  localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light');
-  $('themeToggle').innerHTML = dark ? '<i class="fa-solid fa-sun"></i>' : '<i class="fa-solid fa-moon"></i>';
+  try { localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light'); } catch {}
+  const icon = dark ? 'fa-sun' : 'fa-moon';
+  $('themeToggle').innerHTML = '<i class="fa-solid ' + icon + '" aria-hidden="true"></i>';
   $('themeToggle').setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+  $('themeToggleRoom').innerHTML = '<i class="fa-solid ' + icon + '" aria-hidden="true"></i> <span class="theme-label">' + (dark ? 'Light mode' : 'Dark mode') + '</span>';
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#181a26' : '#f7f8fc';
 }
 
-if (localStorage.getItem('syncparty-theme') === 'dark') toggleTheme();
+try { if (localStorage.getItem('syncparty-theme') === 'dark') toggleTheme(); } catch {}
 
 function normalizeCode(value) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/^PARTY-?/, '').replace(/-/g, '').slice(0, 10);
@@ -78,8 +83,8 @@ function showRoom() {
   $('room').classList.remove('hidden');
   $('roomCodeDisplay').textContent = state.code;
   $('roleBadge').innerHTML = state.role === 'host'
-    ? '<i class="fa-solid fa-crown mr-1"></i>Host'
-    : '<i class="fa-solid fa-eye mr-1"></i>Viewer';
+    ? '<i class="fa-solid fa-crown" aria-hidden="true"></i> Host'
+    : '<i class="fa-solid fa-eye" aria-hidden="true"></i> Viewer';
   $('hostControls').classList.toggle('hidden', state.role !== 'host');
   $('hostPlayback').classList.toggle('hidden', state.role !== 'host');
   $('guestBar').classList.toggle('hidden', state.role !== 'guest');
@@ -226,23 +231,23 @@ function renderViewers() {
   el.replaceChildren();
   viewers.forEach(viewer => {
     const chip = document.createElement('div');
-    chip.className = 'flex items-center gap-2 shrink-0 rounded-xl bg-[#fafafe] border border-[#f0f0f5] px-2.5 py-2';
+    chip.className = 'viewer-chip';
     const avatar = document.createElement('span');
-    avatar.className = 'avatar !w-7 !h-7 !rounded-[9px] !text-[11px]';
+    avatar.className = 'viewer-avatar';
     avatar.textContent = viewer.name.trim().slice(0, 1).toUpperCase() || '?';
     const label = document.createElement('span');
-    label.className = 'text-xs font-semibold text-[#62697c] max-w-[95px] truncate';
+    label.className = 'viewer-name';
     label.textContent = viewer.name;
     const tag = document.createElement('span');
-    tag.className = 'text-[9px] font-bold text-[#8179db]';
+    tag.className = 'viewer-role';
     tag.textContent = viewer.role === 'host' ? 'HOST' : '';
     chip.append(avatar, label, tag);
     if (state.role === 'host' && viewer.role !== 'host') {
       const actions = document.createElement('div');
-      actions.className = 'flex gap-1 ml-1';
+      actions.className = 'viewer-actions';
       [['transfer', 'fa-crown', 'Transfer host'], ['kick', 'fa-user-xmark', 'Remove viewer'], ['ban', 'fa-ban', 'Ban viewer']].forEach(([action, icon, title]) => {
         const button = document.createElement('button');
-        button.className = 'text-[10px] text-[#7167e8] hover:text-red-500';
+        button.className = 'viewer-action';
         button.title = title;
         button.setAttribute('aria-label', title + ' ' + viewer.name);
         button.innerHTML = '<i class="fa-solid ' + icon + '"></i>';
@@ -258,13 +263,14 @@ function renderViewers() {
 
 function updateRoleUi() {
   $('roleBadge').innerHTML = state.role === 'host'
-    ? '<i class="fa-solid fa-crown mr-1"></i>Host'
-    : '<i class="fa-solid fa-eye mr-1"></i>Viewer';
+    ? '<i class="fa-solid fa-crown" aria-hidden="true"></i> Host'
+    : '<i class="fa-solid fa-eye" aria-hidden="true"></i> Viewer';
   $('hostControls').classList.toggle('hidden', state.role !== 'host');
   $('hostPlayback').classList.toggle('hidden', state.role !== 'host');
   $('guestBar').classList.toggle('hidden', state.role !== 'guest');
   $('resyncBtn').classList.toggle('hidden', state.role !== 'guest');
   renderViewers();
+  if (state.video) mountVideo(state.video);
 }
 
 async function moderateViewer(sessionId, action, name) {
@@ -300,7 +306,7 @@ function setGuestStatus(ok, text) {
   const dot = $('guestConnectionDot');
   const label = $('guestConnectionText');
   const retry = $('retryConnection');
-  if (dot) dot.className = 'w-2.5 h-2.5 rounded-full ' + (ok ? 'bg-emerald-400' : 'bg-amber-400');
+  if (dot) dot.className = 'guest-dot' + (ok ? ' connected' : '');
   if (label) label.textContent = text;
   if (retry) retry.classList.toggle('hidden', ok || text === 'Connecting to room…' || text === 'Waiting for the host…');
 }
@@ -311,11 +317,12 @@ function broadcast(event, payload) {
 }
 
 function addSystem(text, localOnly = false) {
+  const wasAtBottom = messagesAtBottom();
   const item = document.createElement('div');
-  item.className = 'text-center text-[11px] text-[#9a9eac] py-1';
+  item.className = 'system-message';
   item.textContent = text;
   $('messages').append(item);
-  scrollMessages();
+  if (wasAtBottom) scrollMessages(true);
   if (!localOnly && state.role === 'host') broadcast('system', { text });
 }
 
@@ -325,18 +332,19 @@ function renderChat(message) {
   if (state.chatSeen.size > 300) state.chatSeen.delete(state.chatSeen.values().next().value);
   const mine = message.sessionId === state.sessionId;
   const row = document.createElement('div');
-  row.className = 'flex ' + (mine ? 'justify-end' : 'justify-start');
+  row.className = 'message-row' + (mine ? ' mine' : '');
   const box = document.createElement('div');
-  box.className = 'msg ' + (mine ? 'mine' : '');
+  box.className = 'message-bubble';
   const meta = document.createElement('div');
-  meta.className = 'text-[10px] font-bold text-[#7167e8] mb-1';
+  meta.className = 'message-meta';
   meta.textContent = (mine ? 'You' : message.name || 'Viewer') + ' · ' + new Date(message.time || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const body = document.createElement('div');
   body.textContent = String(message.text || '').slice(0, 500);
   box.append(meta, body);
+  const wasAtBottom = messagesAtBottom();
   row.append(box);
   $('messages').append(row);
-  scrollMessages();
+  if (mine || wasAtBottom) scrollMessages(true);
   const chatText = String(message.text || '').toLowerCase();
   if (!mine && chatText.includes('@' + state.name.toLowerCase())) notifyMention(message);
 }
@@ -358,8 +366,13 @@ function notifyMention(message) {
   }
 }
 
-function scrollMessages() {
-  $('messages').scrollTop = $('messages').scrollHeight;
+function messagesAtBottom() {
+  const messages = $('messages');
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 48;
+}
+
+function scrollMessages(force = false) {
+  if (force || messagesAtBottom()) $('messages').scrollTop = $('messages').scrollHeight;
 }
 
 function sendChat(event) {
@@ -371,6 +384,68 @@ function sendChat(event) {
   renderChat(message);
   broadcast('chat', message);
   $('chatInput').value = '';
+  hideMentionSuggestions();
+}
+
+function hideMentionSuggestions() {
+  $('mentionSuggestions').classList.add('hidden');
+  $('mentionSuggestions').replaceChildren();
+  state.mentionCandidates = [];
+  state.mentionIndex = 0;
+}
+
+function showMentionSuggestions() {
+  const input = $('chatInput');
+  const match = input.value.match(/(^|\s)@([\w .-]*)$/u);
+  if (!match) return hideMentionSuggestions();
+  const query = match[2].trim().toLowerCase();
+  const candidates = presenceList().filter(person => person.sessionId !== state.sessionId
+    && person.name.toLowerCase().startsWith(query));
+  state.mentionCandidates = candidates.slice(0, 8);
+  state.mentionIndex = 0;
+  const list = $('mentionSuggestions');
+  list.replaceChildren();
+  if (!state.mentionCandidates.length) return list.classList.add('hidden');
+  state.mentionCandidates.forEach((person, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'mention-option';
+    option.setAttribute('role', 'option');
+    option.innerHTML = '<span class="viewer-avatar">' + escapeHtml(person.name.slice(0, 1).toUpperCase()) + '</span>'
+      + '<span>' + escapeHtml(person.name) + (person.role === 'host' ? ' · Host' : '') + '</span>';
+    option.addEventListener('pointerdown', event => event.preventDefault());
+    option.addEventListener('click', () => insertMention(index));
+    list.append(option);
+  });
+  list.classList.remove('hidden');
+}
+
+function handleMentionKey(event) {
+  if ($('mentionSuggestions').classList.contains('hidden')) return;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const direction = event.key === 'ArrowDown' ? 1 : -1;
+    state.mentionIndex = (state.mentionIndex + direction + state.mentionCandidates.length) % state.mentionCandidates.length;
+    $('mentionSuggestions').querySelectorAll('.mention-option').forEach((option, index) => {
+      option.setAttribute('aria-selected', String(index === state.mentionIndex));
+    });
+  } else if (event.key === 'Enter' && state.mentionCandidates.length) {
+    event.preventDefault();
+    insertMention(state.mentionIndex);
+  } else if (event.key === 'Escape') hideMentionSuggestions();
+}
+
+function insertMention(index) {
+  const person = state.mentionCandidates[index];
+  if (!person) return;
+  const input = $('chatInput');
+  input.value = input.value.replace(/(^|\s)@[\w .-]*$/u, (_, prefix) => prefix + '@' + person.name + ' ');
+  hideMentionSuggestions();
+  input.focus();
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
 async function copyText(value, successText) {
@@ -473,9 +548,42 @@ async function uploadVideoFile(event) {
 
 function toggleFullscreen() {
   const frame = $('playerFrame');
-  if (document.fullscreenElement) document.exitFullscreen?.();
-  else frame.requestFullscreen?.().catch(() => toast('Fullscreen is not available in this browser.'));
+  if (document.fullscreenElement || document.webkitFullscreenElement || state.player?.webkitDisplayingFullscreen) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) Promise.resolve(exit.call(document)).catch(() => toast('Could not leave fullscreen.'));
+    else if (state.player?.webkitExitFullscreen) state.player.webkitExitFullscreen();
+    return;
+  }
+  const youtubeFrame = state.video?.mode === 'youtube' ? state.player?.getIframe?.() : null;
+  const request = frame.requestFullscreen || frame.webkitRequestFullscreen
+    || youtubeFrame?.requestFullscreen || youtubeFrame?.webkitRequestFullscreen;
+  if (request) {
+    const target = frame.requestFullscreen || frame.webkitRequestFullscreen ? frame : youtubeFrame;
+    Promise.resolve(request.call(target)).catch(() => toast('Fullscreen is not available in this browser.'));
+    return;
+  }
+  if (state.player?.webkitEnterFullscreen) return state.player.webkitEnterFullscreen();
+  toast('Fullscreen is not available in this browser.');
 }
+
+function updateFullscreenButton() {
+  const youtubeFrame = state.video?.mode === 'youtube' ? state.player?.getIframe?.() : null;
+  const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+  const fullscreen = fullscreenElement === $('playerFrame') || fullscreenElement === youtubeFrame
+    || !!state.player?.webkitDisplayingFullscreen;
+  const button = $('fullscreenToggle');
+  if (!button) return;
+  button.innerHTML = fullscreen
+    ? '<i class="fa-solid fa-compress" aria-hidden="true"></i><span>Exit fullscreen</span>'
+    : '<i class="fa-solid fa-expand" aria-hidden="true"></i><span>Fullscreen</span>';
+  button.setAttribute('aria-label', fullscreen ? 'Exit fullscreen' : 'Enter fullscreen');
+  button.title = fullscreen ? 'Exit fullscreen' : 'Enter fullscreen';
+}
+
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitbeginfullscreen', updateFullscreenButton, true);
+document.addEventListener('webkitendfullscreen', updateFullscreenButton, true);
 
 function showUrlError(message) {
   $('urlError').textContent = message;
@@ -486,6 +594,7 @@ function mountVideo(video) {
   state.ready = false;
   state.suppress = true;
   const frame = $('playerFrame');
+  const fullscreenButton = $('fullscreenToggle');
   frame.replaceChildren();
   if (video.mode !== 'youtube') {
     const player = document.createElement('video');
@@ -506,14 +615,14 @@ function mountVideo(video) {
       setPlayStatus('Video could not be loaded');
       toast('This video link is unavailable to one or more viewers. Try a public, browser-playable video URL.');
     });
-    frame.append(player);
+    frame.append(player, fullscreenButton);
     state.player = player;
     return;
   }
   const box = document.createElement('div');
   box.id = 'ytPlayer';
   box.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
-  frame.append(box);
+  frame.append(box, fullscreenButton);
   loadYouTubeApi().then(() => {
     state.player = new YT.Player('ytPlayer', {
       videoId: video.id,
@@ -672,7 +781,8 @@ function backToLanding() {
   state.role = null;
   state.code = '';
   $('messages').replaceChildren();
-  $('playerFrame').innerHTML = '<div class="placeholder"><div class="w-[58px] h-[58px] rounded-2xl bg-white/10 grid place-items-center mx-auto mb-3 text-white"><i class="fa-solid fa-play ml-1"></i></div><div class="font-semibold text-sm text-white">Your watch party starts here</div><div class="text-xs text-[#a9adba] mt-1">The host can load a video anytime</div></div>';
+  $('playerFrame').innerHTML = '<div class="placeholder"><span class="placeholder-icon"><i class="fa-solid fa-play" aria-hidden="true"></i></span><span class="placeholder-title">Your watch party starts here</span><span class="placeholder-copy">The host can load a video anytime</span></div><button id="fullscreenToggle" class="fullscreen-toggle" onclick="toggleFullscreen()" aria-label="Enter fullscreen" title="Enter fullscreen"><i class="fa-solid fa-expand" aria-hidden="true"></i><span>Fullscreen</span></button>';
+  hideMentionSuggestions();
 }
 
 $('roomCode').addEventListener('input', event => {
