@@ -1,6 +1,6 @@
 # SyncParty
 
-Make a room, send the invite link, and watch together. The host controls a shared YouTube or public MP4 player; guests follow playback and can chat. No accounts, ports, or network settings for viewers.
+Make a room, send the invite link, and watch together. The host controls a shared YouTube or public MP4 player; guests follow playback and can chat. Voice and camera are optional, off by default, and available when someone chooses to join.
 
 ## One-time project setup
 
@@ -12,6 +12,12 @@ The room service uses Supabase Realtime. This replaces direct browser-to-browser
 4. Push the project to the `main` branch of GitHub. The Pages workflow deploys the static app after `config.js` has real project values.
 
 Room channels use Supabase's public Broadcast and Presence features. Each room has a random 10-character code. Messages and viewer presence are temporary; the app does not store chat or video files in a database. The publishable key and project URL are visible to site visitors by design; never put a secret or `service_role` key in this static app. The room creator does this setup once. Everyone using the app just creates a room or opens an invite link.
+
+## Voice and camera
+
+The room includes **Join voice**, **Join with camera**, microphone mute, camera on/off, and **Leave call** controls. Media stays off until a user chooses a control and grants the browser permission. Camera preview and remote video appear in the room's media panel. The browser's `getUserMedia()` API requires a secure context such as GitHub Pages over HTTPS or `localhost`.
+
+Calls use browser WebRTC peer-to-peer connections. The existing Supabase Realtime channel carries only call setup messages; audio and video travel directly between the participants' browsers. No additional API key or paid media provider is added. A public STUN server helps peers discover direct routes, but there is no TURN relay. Some school, work, carrier, or home networks block direct peer traffic, so calls may fail there even when watching and chat continue. Direct WebRTC calls can reveal a participant's public network address to other call participants. WebRTC documents TURN as the relay option when direct connections cannot be established. The media call supports up to five participants; this keeps the mesh connection and bandwidth load small. Supabase Realtime remains subject to the limits of the existing Supabase project.
 
 ## Run locally
 
