@@ -411,8 +411,11 @@ async function trackPresence() {
 function hostedCallUrl(kind = 'audio') {
   const roomName = 'syncparty-' + normalizeCode(state.code).toLowerCase();
   const videoMuted = kind !== 'video';
+  const displayName = encodeURIComponent('"' + state.name + '"');
   return 'https://' + HOSTED_CALL_DOMAIN + '/' + encodeURIComponent(roomName)
-    + '#config.startWithAudioMuted=false&config.startWithVideoMuted=' + videoMuted;
+    + '#userInfo.displayName=' + displayName
+    + '&config.prejoinConfig.enabled=false'
+    + '&config.startWithAudioMuted=false&config.startWithVideoMuted=' + videoMuted;
 }
 
 function updateMediaControls() {
@@ -430,11 +433,11 @@ function updateMediaControls() {
 
   const callLink = $('mediaCallLink');
   if (callOpen) {
-    if (status) status.textContent = 'Call opened in a new tab. Use its microphone and camera controls.';
+    if (status) status.textContent = 'Call is open in its own window. Keep this tab open for the watch party.';
   } else if (status && callLink && !callLink.classList.contains('hidden')) {
-    status.textContent = 'Your browser blocked the new tab. Click the call link below.';
+    status.textContent = 'Your browser blocked the call window. Allow pop-ups or use the call link below.';
   } else if (status) {
-    status.textContent = 'Your microphone and camera stay off until you join the call in a new tab.';
+    status.textContent = 'Your name is carried into the call. Your browser may ask for microphone or camera access.';
   }
 }
 
@@ -442,8 +445,8 @@ function renderMediaParticipants() {
   const empty = $('mediaEmptyState');
   const callOpen = !!state.callWindow && !state.callWindow.closed;
   if (empty) empty.textContent = callOpen
-    ? 'Keep this page open to watch together. Join and control the call in its separate tab.'
-    : 'The call opens in a separate tab. Your watch party stays here.';
+    ? 'Your watch party stays in this tab while the call runs in its own window.'
+    : 'On desktop, the call opens in a compact window beside your watch party.';
   updateMediaControls();
 }
 
@@ -472,27 +475,36 @@ function joinMedia(kind) {
   if (state.callWindow && !state.callWindow.closed) {
     try { state.callWindow.focus(); } catch {}
     updateMediaControls();
-    toast('Your call is already open. Use the call tab to turn your camera or microphone on or off.');
+    toast('Your call is already open. Use its controls to turn your camera or microphone on or off.');
     return;
   }
 
   let callWindow = null;
-  try { callWindow = window.open(url, '_blank'); } catch {}
+  const screenLeft = window.screenX ?? window.screenLeft ?? 0;
+  const screenTop = window.screenY ?? window.screenTop ?? 0;
+  const availableWidth = window.screen?.availWidth || window.outerWidth || 1100;
+  const availableHeight = window.screen?.availHeight || window.outerHeight || 800;
+  const width = Math.min(1100, Math.max(360, availableWidth - 40));
+  const height = Math.min(820, Math.max(520, availableHeight - 60));
+  const left = Math.max(0, Math.round(screenLeft + ((window.outerWidth || width) - width) / 2));
+  const top = Math.max(0, Math.round(screenTop + ((window.outerHeight || height) - height) / 2));
+  const popupFeatures = `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`;
+  try { callWindow = window.open(url, 'syncparty-call', popupFeatures); } catch {}
   if (callWindow) {
     try { callWindow.opener = null; } catch {}
     state.callWindow = callWindow;
     clearCallLink();
-    toast(kind === 'audio' ? 'Voice call opened in a new tab.' : 'Camera call opened in a new tab.');
+    toast(kind === 'audio' ? 'Voice call opened in a separate window.' : 'Camera call opened in a separate window.');
   } else {
     showCallLink(url);
-    toast('Your browser blocked the new tab. Click the call link below to open it.');
+    toast('Your browser blocked the call window. Allow pop-ups or use the call link below.');
   }
   updateMediaControls();
 }
 
 function openHostedCallFromLink(event) {
-  joinMedia('audio');
   if (state.callWindow && !state.callWindow.closed) {
+    try { state.callWindow.focus(); } catch {}
     event.preventDefault();
     return false;
   }

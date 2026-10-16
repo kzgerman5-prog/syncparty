@@ -15,7 +15,7 @@ Room channels use Supabase's public Broadcast and Presence features. Each room h
 
 ## Voice and camera
 
-The room includes **Open voice call** and **Open camera call** controls. Calls open in a separate tab because the free Freifunk München service refuses to load inside an embedded frame. The watch-party room code automatically creates the call link, so participants do not enter server details or configure a backend. Use the controls in the call tab to join, mute, enable the camera, or leave. If the browser blocks the new tab, SyncParty shows a direct call link.
+The room includes voice and camera call controls. On desktop, calls open in a compact browser window so the watch-party room remains in its tab; the Freifunk München service refuses to load inside an embedded frame. The watch-party room code and the name already entered in SyncParty are carried into the call, so participants do not enter server details or type their name again. Use the call window's controls to mute, enable the camera, or leave. If the browser blocks the popup, allow pop-ups for SyncParty or use the direct call link. On phones and tablets, the browser may show the call as a full-screen page.
 
 The community-operated service is free, requires no account, and supports up to 70 people per room, but it does not guarantee availability. Call audio and video are processed by the provider and are not end-to-end encrypted. SyncParty does not screen-share or send watch-party video through the call; each viewer plays the video in their own YouTube or MP4 player. [Freifunk München service information](https://www.ffmuc.net/wiki/knb:meet-en).
 ## Run locally
