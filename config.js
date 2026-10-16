@@ -3,4 +3,5 @@
 window.SYNCPARTY_CONFIG = {
   url: 'https://svhakcxuowjpnqpcuscn.supabase.co',
   publishableKey: 'sb_publishable_--txUrHkTMp6fnwMLdFlvA_yTzH79uk',
+  storageBucket: 'syncparty-videos',
 };

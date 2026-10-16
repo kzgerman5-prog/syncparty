@@ -16,6 +16,7 @@ const state = {
   suppress: false,
   lastState: null,
   chatSeen: new Set(),
+  bannedSessions: new Set(),
   toastTimer: null,
 };
 
@@ -31,10 +32,19 @@ function setTab(tab) {
 function setMode(mode) {
   state.mode = mode;
   $('ytMode').classList.toggle('active', mode === 'youtube');
-  $('mp4Mode').classList.toggle('active', mode === 'mp4');
-  $('videoUrl').placeholder = mode === 'youtube' ? 'Paste a YouTube link or video ID' : 'Paste a direct .mp4 link';
+  $('mp4Mode').classList.toggle('active', mode === 'video');
+  $('videoUrl').placeholder = mode === 'youtube' ? 'Paste a YouTube link or video ID' : 'Paste a direct MP4, WebM, or other browser-playable video URL';
   $('urlError').classList.add('hidden');
 }
+
+function toggleTheme() {
+  const dark = document.documentElement.classList.toggle('theme-dark');
+  localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light');
+  $('themeToggle').innerHTML = dark ? '<i class="fa-solid fa-sun"></i>' : '<i class="fa-solid fa-moon"></i>';
+  $('themeToggle').setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+}
+
+if (localStorage.getItem('syncparty-theme') === 'dark') toggleTheme();
 
 function normalizeCode(value) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/^PARTY-?/, '').replace(/-/g, '').slice(0, 10);
@@ -75,6 +85,7 @@ function showRoom() {
   $('guestBar').classList.toggle('hidden', state.role !== 'guest');
   $('resyncBtn').classList.toggle('hidden', state.role !== 'guest');
   renderViewers();
+  if (state.video) mountVideo(state.video);
   addSystem(state.role === 'host' ? 'You started the party.' : 'You joined the party.', true);
 }
 
@@ -138,13 +149,15 @@ function connectToRoom() {
           setGuestStatus(false, 'The host ended the party');
         }
       })
+      .on('broadcast', { event: 'moderation' }, ({ payload }) => handleModeration(payload))
       .on('presence', { event: 'sync' }, () => {
         renderViewers();
         updateGuestPresence();
       })
       .on('presence', { event: 'join' }, ({ newPresences }) => {
         if (state.role === 'host') newPresences.forEach(person => {
-          if (person.sessionId !== state.sessionId) addSystem((person.name || 'A viewer') + ' joined the party.');
+          if (state.bannedSessions.has(person.sessionId)) broadcast('moderation', { target: person.sessionId, action: 'ban' });
+          else if (person.sessionId !== state.sessionId) addSystem((person.name || 'A viewer') + ' joined the party.');
         });
       })
       .on('presence', { event: 'leave' }, ({ leftPresences }) => {
@@ -195,7 +208,7 @@ function presenceList() {
   const entries = Object.values(state.channel.presenceState()).flat();
   const unique = new Map();
   entries.forEach(person => {
-    if (person?.sessionId) unique.set(person.sessionId, { name: person.name || 'Viewer', role: person.role });
+    if (person?.sessionId) unique.set(person.sessionId, { sessionId: person.sessionId, name: person.name || 'Viewer', role: person.role });
   });
   return Array.from(unique.values());
 }
@@ -224,9 +237,63 @@ function renderViewers() {
     tag.className = 'text-[9px] font-bold text-[#8179db]';
     tag.textContent = viewer.role === 'host' ? 'HOST' : '';
     chip.append(avatar, label, tag);
+    if (state.role === 'host' && viewer.role !== 'host') {
+      const actions = document.createElement('div');
+      actions.className = 'flex gap-1 ml-1';
+      [['transfer', 'fa-crown', 'Transfer host'], ['kick', 'fa-user-xmark', 'Remove viewer'], ['ban', 'fa-ban', 'Ban viewer']].forEach(([action, icon, title]) => {
+        const button = document.createElement('button');
+        button.className = 'text-[10px] text-[#7167e8] hover:text-red-500';
+        button.title = title;
+        button.setAttribute('aria-label', title + ' ' + viewer.name);
+        button.innerHTML = '<i class="fa-solid ' + icon + '"></i>';
+        button.onclick = () => moderateViewer(viewer.sessionId, action, viewer.name);
+        actions.append(button);
+      });
+      chip.append(actions);
+    }
     el.append(chip);
   });
   $('viewerCount').textContent = viewers.length + ' here';
+}
+
+function updateRoleUi() {
+  $('roleBadge').innerHTML = state.role === 'host'
+    ? '<i class="fa-solid fa-crown mr-1"></i>Host'
+    : '<i class="fa-solid fa-eye mr-1"></i>Viewer';
+  $('hostControls').classList.toggle('hidden', state.role !== 'host');
+  $('hostPlayback').classList.toggle('hidden', state.role !== 'host');
+  $('guestBar').classList.toggle('hidden', state.role !== 'guest');
+  $('resyncBtn').classList.toggle('hidden', state.role !== 'guest');
+  renderViewers();
+}
+
+async function moderateViewer(sessionId, action, name) {
+  if (state.role !== 'host' || !sessionId || !['transfer', 'kick', 'ban'].includes(action)) return;
+  if (!await broadcast('moderation', { target: sessionId, action })) return toast('Could not send the room action. Check your connection.');
+  if (action === 'transfer') {
+    addSystem('Host role transferred to ' + name + '.');
+    state.role = 'guest';
+    await state.channel.track({ sessionId: state.sessionId, name: state.name, role: state.role });
+    updateRoleUi();
+  } else {
+    if (action === 'ban') state.bannedSessions.add(sessionId);
+    addSystem(name + (action === 'ban' ? ' was banned from this room.' : ' was removed from the room.'));
+  }
+}
+
+async function handleModeration(payload) {
+  if (!payload || payload.target !== state.sessionId) return;
+  if (payload.action === 'transfer') {
+    state.role = 'host';
+    await state.channel?.track({ sessionId: state.sessionId, name: state.name, role: state.role });
+    updateRoleUi();
+    addSystem('You are now the host.', true);
+    toast('You are now the host.');
+  } else if (payload.action === 'kick' || payload.action === 'ban') {
+    addSystem(payload.action === 'ban' ? 'The host banned you from this room.' : 'The host removed you from this room.', true);
+    toast(payload.action === 'ban' ? 'You were banned from this room.' : 'You were removed from this room.');
+    setTimeout(() => { cleanup(); backToLanding(); }, 900);
+  }
 }
 
 function setGuestStatus(ok, text) {
@@ -270,6 +337,25 @@ function renderChat(message) {
   row.append(box);
   $('messages').append(row);
   scrollMessages();
+  const chatText = String(message.text || '').toLowerCase();
+  if (!mine && chatText.includes('@' + state.name.toLowerCase())) notifyMention(message);
+}
+
+function notifyMention(message) {
+  let notice = $('mentionNotice');
+  if (!notice) {
+    notice = document.createElement('button');
+    notice.id = 'mentionNotice';
+    notice.className = 'mention-notice';
+    notice.onclick = () => { $('chatInput').focus(); notice.remove(); };
+    document.body.append(notice);
+  }
+  notice.textContent = (message.name || 'Someone') + ' mentioned you in chat: ' + String(message.text).slice(0, 100);
+  clearTimeout(state.mentionTimer);
+  state.mentionTimer = setTimeout(() => notice.remove(), 6000);
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    new Notification('SyncParty mention', { body: (message.name || 'Someone') + ' mentioned you in chat.' });
+  }
 }
 
 function scrollMessages() {
@@ -339,9 +425,9 @@ function loadVideo() {
     video = { mode: 'youtube', id };
   } else {
     let url;
-    try { url = new URL(raw); } catch { return showUrlError('Paste a complete MP4 link starting with http:// or https://.'); }
-    if (!/^https?:$/.test(url.protocol)) return showUrlError('MP4 links must start with http:// or https://.');
-    video = { mode: 'mp4', url: url.href };
+    try { url = new URL(raw); } catch { return showUrlError('Paste a direct video file URL starting with http:// or https://.'); }
+    if (!/^https?:$/.test(url.protocol)) return showUrlError('Video links must start with http:// or https://.');
+    video = { mode: 'video', url: url.href };
   }
   $('urlError').classList.add('hidden');
   state.video = video;
@@ -349,6 +435,46 @@ function loadVideo() {
   mountVideo(video);
   sendState(state.lastState);
   setPlayStatus('Ready to play');
+}
+
+async function uploadVideoFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+  if (!file.type.startsWith('video/')) return showUrlError('Choose a video file.');
+  if (file.size > 500 * 1024 * 1024) return showUrlError('Choose a video smaller than 500 MB.');
+  const config = window.SYNCPARTY_CONFIG || {};
+  const bucket = config.storageBucket || 'syncparty-videos';
+  if (!state.client?.storage) return showUrlError('Supabase Storage is unavailable. Check the Supabase connection.');
+  $('uploadStatus').textContent = 'Uploading ' + file.name + '…';
+  $('uploadStatus').classList.remove('hidden');
+  $('urlError').classList.add('hidden');
+  try {
+    const safeName = file.name.replace(/[^\w.-]+/g, '_').slice(-100) || 'video';
+    const path = normalizeCode(state.code) + '/' + crypto.randomUUID() + '-' + safeName;
+    const { error } = await state.client.storage.from(bucket).upload(path, file, {
+      contentType: file.type,
+      cacheControl: '3600',
+      upsert: false,
+    });
+    if (error) throw error;
+    const { data } = state.client.storage.from(bucket).getPublicUrl(path);
+    $('videoUrl').value = data.publicUrl;
+    setMode('video');
+    loadVideo();
+    $('uploadStatus').textContent = 'Upload complete. Your video is ready for the room.';
+  } catch (error) {
+    $('uploadStatus').classList.add('hidden');
+    showUrlError(error?.message?.includes('Bucket not found')
+      ? 'Storage bucket not found. Create the public bucket "' + bucket + '" and enable room uploads as described in README.md.'
+      : 'Upload failed. Check the Storage bucket upload policy and try again.');
+  }
+}
+
+function toggleFullscreen() {
+  const frame = $('playerFrame');
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else frame.requestFullscreen?.().catch(() => toast('Fullscreen is not available in this browser.'));
 }
 
 function showUrlError(message) {
@@ -361,7 +487,7 @@ function mountVideo(video) {
   state.suppress = true;
   const frame = $('playerFrame');
   frame.replaceChildren();
-  if (video.mode === 'mp4') {
+  if (video.mode !== 'youtube') {
     const player = document.createElement('video');
     player.controls = state.role === 'host';
     player.playsInline = true;
@@ -371,14 +497,14 @@ function mountVideo(video) {
       state.ready = true;
       state.suppress = false;
       syncPlayButton();
-      if (state.role === 'guest' && state.lastState) applyState(state.lastState);
+      if (state.lastState) applyState(state.lastState);
     });
     player.addEventListener('play', () => { if (!state.suppress && state.role === 'host') publishPlayerState(true); });
     player.addEventListener('pause', () => { if (!state.suppress && state.role === 'host' && !player.ended) publishPlayerState(false); });
     player.addEventListener('seeked', () => { if (!state.suppress && state.role === 'host') publishPlayerState(!player.paused); });
     player.addEventListener('error', () => {
       setPlayStatus('Video could not be loaded');
-      toast('This MP4 link is unavailable to one or more viewers. Try a public video link.');
+      toast('This video link is unavailable to one or more viewers. Try a public, browser-playable video URL.');
     });
     frame.append(player);
     state.player = player;
@@ -399,7 +525,7 @@ function mountVideo(video) {
           state.ready = true;
           state.suppress = false;
           syncPlayButton();
-          if (state.role === 'guest' && state.lastState) applyState(state.lastState);
+          if (state.lastState) applyState(state.lastState);
         },
         onStateChange: event => {
           if (state.role !== 'host' || state.suppress) return;
@@ -434,7 +560,7 @@ function loadYouTubeApi() {
 
 function playerTime() {
   try {
-    if (state.video?.mode === 'mp4') return state.player?.currentTime || 0;
+    if (state.video?.mode !== 'youtube') return state.player?.currentTime || 0;
     if (state.player?.getCurrentTime) return state.player.getCurrentTime();
   } catch {}
   return 0;
@@ -442,7 +568,7 @@ function playerTime() {
 
 function isPlaying() {
   try {
-    if (state.video?.mode === 'mp4') return !!state.player && !state.player.paused;
+    if (state.video?.mode !== 'youtube') return !!state.player && !state.player.paused;
     return !!state.player?.getPlayerState && state.player.getPlayerState() === YT.PlayerState.PLAYING;
   } catch { return false; }
 }
@@ -471,11 +597,11 @@ function applyState(playbackState) {
     if (!state.ready || !state.player) return;
     try {
       if (Math.abs(playerTime() - target) > 1.5) {
-        if (state.video.mode === 'mp4') state.player.currentTime = target;
+        if (state.video.mode !== 'youtube') state.player.currentTime = target;
         else state.player.seekTo(target, true);
       }
       state.suppress = true;
-      if (state.video.mode === 'mp4') {
+      if (state.video.mode !== 'youtube') {
         if (playbackState.playing) state.player.play().catch(() => setPlayStatus('Tap play to start in sync'));
         else state.player.pause();
       } else if (playbackState.playing) state.player.playVideo();
@@ -490,7 +616,7 @@ function applyState(playbackState) {
 
 function togglePlayback() {
   if (state.role !== 'host' || !state.player) return;
-  if (state.video.mode === 'mp4') {
+  if (state.video.mode !== 'youtube') {
     if (state.player.paused) state.player.play().catch(() => toast('Tap play again to start the video.'));
     else state.player.pause();
   } else if (isPlaying()) state.player.pauseVideo();
@@ -500,7 +626,7 @@ function togglePlayback() {
 function seekBy(delta) {
   if (state.role !== 'host' || !state.player) return;
   const time = Math.max(0, playerTime() + delta);
-  if (state.video.mode === 'mp4') state.player.currentTime = time;
+  if (state.video.mode !== 'youtube') state.player.currentTime = time;
   else state.player.seekTo(time, true);
   setTimeout(() => publishPlayerState(isPlaying()), 150);
 }
@@ -530,6 +656,7 @@ function cleanup() {
   state.lastState = null;
   state.ready = false;
   state.chatSeen.clear();
+  state.bannedSessions.clear();
 }
 
 async function leaveRoom() {

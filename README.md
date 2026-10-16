@@ -1,30 +1,45 @@
 # SyncParty
 
-Make a room, send the invite link, and watch together. The host controls a shared YouTube or public MP4 player; guests follow playback and can chat. No accounts, ports, or network settings for viewers.
+One person creates a room and becomes the host. Friends join with a room code or invite link. The host controls a video, and everyone's player stays in sync automatically. Rooms include live chat and a viewer list.
 
-## One-time project setup
+## Setup
 
-The room service uses Supabase Realtime. This replaces direct browser-to-browser connections, which can be blocked by school, mobile, or home network firewalls.
+The room service uses Supabase Realtime. The project URL and publishable key are in `config.js`; these are browser-visible values. Never put a secret or `service_role` key in this static app. Enable public Realtime channels in the Supabase project.
 
-1. Create a Supabase project.
-2. Copy its Project URL and **publishable** key from the project's Connect dialog. Make sure public Realtime channels are enabled in the project's Realtime settings.
-3. Paste them into `config.js`. Do not use a secret or `service_role` key.
-4. Push the project to the `main` branch of GitHub. The Pages workflow deploys the static app after `config.js` has real project values.
+To let hosts upload a local video so room members can watch it, create a public Supabase Storage bucket and allow room uploads. In the Supabase SQL Editor, run:
 
-Room channels use Supabase's public Broadcast and Presence features. Each room has a random 10-character code. Messages and viewer presence are temporary; the app does not store chat or video files in a database. The publishable key and project URL are visible to site visitors by design; never put a secret or `service_role` key in this static app. The room creator does this setup once. Everyone using the app just creates a room or opens an invite link.
+```sql
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'syncparty-videos', 'syncparty-videos', true, 524288000,
+  array['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/ogg', 'video/mpeg', 'video/x-msvideo', 'video/x-ms-wmv', 'video/3gpp', 'video/x-m4v', 'video/x-flv']
+)
+on conflict (id) do update set public = true, file_size_limit = 524288000;
 
-## Run locally
+create policy "SyncParty videos are readable"
+on storage.objects for select to public
+using (bucket_id = 'syncparty-videos');
 
-Serve the folder over HTTP (for example, `python -m http.server 8000`) and open `http://localhost:8000`. Paste the same Supabase URL and publishable key into `config.js` first.
+create policy "Room members can upload SyncParty videos"
+on storage.objects for insert to anon
+with check (
+  bucket_id = 'syncparty-videos'
+  and (storage.foldername(name))[1] ~ '^[A-Z0-9]{10}$'
+);
+```
 
-## Video links
+The upload control accepts video files up to 500 MB. Files are stored in the public bucket so every viewer can load the same URL. Anyone with the app's public Supabase configuration can upload to this bucket, so monitor storage use and remove old uploads when they are no longer needed. To use another bucket, set `storageBucket` in `config.js` and adjust the SQL policies to match.
 
-Each viewer's device loads the video directly from YouTube or the supplied MP4 URL. YouTube videos must allow embedded playback. MP4 links must be public, playable in a browser, and reachable from each viewer's network. SyncParty sends playback state; it does not relay or host video files.
+## Video playback
 
-## Deploy with GitHub Pages
+Hosts can load YouTube links or direct video file URLs supported by the viewer's browser (such as MP4 and WebM). A webpage link from a streaming service is not necessarily a playable video URL: providers that block embedding or do not expose a browser-playable media URL cannot be synced by this static player. Uploaded local files are first sent to the configured Storage bucket, then shared with the room. The host's controls and playback position are broadcast through Supabase Realtime.
 
-In the repository, open **Settings → Pages → Build and deployment** and select **GitHub Actions**. Push to `main` to deploy using `.github/workflows/pages.yml`.
+## Run and deploy
+
+Serve the folder over HTTP (for example, `python -m http.server 8000`) and open `http://localhost:8000`. GitHub Pages deployment is configured in `.github/workflows/pages.yml`; select GitHub Actions in **Settings → Pages → Build and deployment**.
+
+Rooms use random 10-character codes. Chat and viewer presence are temporary; the app does not store messages in a database. Remove/ban actions and host transfer are intended for friendly rooms: public Realtime channels do not provide account-based host authorization, so these controls are not a security boundary. Bans are kept in the current host tab's memory and can be bypassed by reconnecting with a new session.
 
 ## Built with
 
-Vanilla HTML, CSS, and JavaScript; Supabase Realtime; the YouTube IFrame API; Tailwind CSS and Font Awesome from public CDNs.
+Vanilla HTML, CSS, and JavaScript; Supabase Realtime and Storage; the YouTube IFrame API; Tailwind CSS and Font Awesome from public CDNs.
