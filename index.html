@@ -65,4 +65,21 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #8f86
 <div id="hostControls" class="panel p-5"><div class="flex items-center justify-between gap-3 mb-4"><div><h2 class="font-bold text-sm m-0">Choose what to watch</h2><p class="text-xs text-[#9599a8] mt-1 mb-0">Your playback controls sync for everyone.</p></div><div class="flex gap-1 p-1 rounded-lg bg-[#f4f5f9]"><button id="ytMode" class="tab active !px-3 !py-2 text-xs" onclick="setMode('youtube')"><i class="fa-brands fa-youtube mr-1"></i>YouTube</button><button id="mp4Mode" class="tab !px-3 !py-2 text-xs" onclick="setMode('mp4')"><i class="fa-solid fa-film mr-1"></i>Direct MP4</button></div></div><label class="label" for="videoUrl">VIDEO LINK OR ID</label><div class="flex flex-col sm:flex-row gap-2"><input id="videoUrl" class="field" placeholder="Paste a YouTube link or video ID"><button class="btn-primary shrink-0" onclick="loadVideo()"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>Load &amp; Sync</button></div><p id="urlError" class="text-xs text-red-500 mt-2 mb-0 hidden"></p></div>
 <div id="guestBar" class="hidden panel px-5 py-4 flex items-center justify-between gap-3"><div class="flex items-center gap-3"><span id="guestConnectionDot" class="w-2.5 h-2.5 rounded-full bg-amber-400"></span><div><div id="guestConnectionText" class="font-bold text-sm">Connecting to host…</div><div class="text-xs text-[#969aab] mt-1">Playback is controlled by the host</div></div></div><button id="retryConnection" class="hidden btn-soft !py-2 !px-3 text-xs" onclick="retryHostConnection()"><i class="fa-solid fa-rotate mr-1"></i>Retry connection</button></div></section>
 <aside class="panel min-h-[540px] flex flex-col overflow-hidden"><div class="px-5 py-4 border-b border-[#eff0f5] flex items-center justify-between"><div class="font-bold text-sm"><i class="fa-regular fa-comments text-[#7167e8] mr-2"></i>Party chat</div><span id="viewerCount" class="text-[11px] bg-[#f3f3f8] text-[#818699] rounded-full px-2.5 py-1">1 here</span></div><div id="viewerList" class="px-4 py-3 border-b border-[#eff0f5] flex gap-2 overflow-x-auto"></div><div id="messages" class="messages flex-1 px-4 py-4" aria-live="polite"></div><form id="chatForm" class="p-3 border-t border-[#eff0f5] flex gap-2" onsubmit="sendChat(event)"><input id="chatInput" class="field !py-2.5 !text-sm" maxlength="500" placeholder="Say something nice…" autocomplete="off"><button class="btn-primary !px-4 !py-2.5" aria-label="Send message"><i class="fa-solid fa-paper-plane"></i></button></form></aside></div><p class="text-center text-[11px] text-[#a4a8b5] mt-5">Keep this tab open while you watch · Rooms sync through the cloud</p></main><div id="toast" class="toast" role="status"></div>
-<script src="./app.js"></script></body></html>
+<script src="./app.js?v=theme-toggle-2"></script>
+<script>
+if (typeof window.toggleTheme !== 'function') {
+  window.toggleTheme = function () {
+    const dark = document.documentElement.classList.toggle('theme-dark');
+    try { localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light'); } catch {}
+    const button = document.getElementById('themeToggle');
+    if (button) {
+      button.innerHTML = '<i class="fa-solid ' + (dark ? 'fa-sun' : 'fa-moon') + '" aria-hidden="true"></i><span>' + (dark ? 'Light mode' : 'Dark / purple') + '</span>';
+      button.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark purple theme');
+      button.setAttribute('title', dark ? 'Switch to light theme' : 'Switch to dark purple theme');
+    }
+    const themeColor = document.querySelector('meta[name="theme-color"]');
+    if (themeColor) themeColor.content = dark ? '#191326' : '#f7f8fc';
+  };
+  try { if (localStorage.getItem('syncparty-theme') === 'dark') window.toggleTheme(); } catch {}
+}
+</script></body></html>
