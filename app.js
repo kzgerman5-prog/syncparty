@@ -34,18 +34,7 @@ const state = {
   bannedSessions: new Set(),
   pendingMentions: [],
   toastTimer: null,
-  jitsiApi: null,
-  jitsiApiPromise: null,
-  jitsiJoinTimer: null,
-  jitsiParticipants: new Map(),
-  jitsiLocalParticipantId: null,
-  jitsiRoomName: '',
-  callJoined: false,
-  callAudioMuted: false,
-  callVideoMuted: true,
-  callParticipantCount: 0,
-  mediaBusy: false,
-  mediaRequestId: 0,
+  callWindow: null,
 };
 
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -419,262 +408,104 @@ async function trackPresence() {
   } catch { return false; }
 }
 
+function hostedCallUrl(kind = 'audio') {
+  const roomName = 'syncparty-' + normalizeCode(state.code).toLowerCase();
+  const videoMuted = kind !== 'video';
+  return 'https://' + HOSTED_CALL_DOMAIN + '/' + encodeURIComponent(roomName)
+    + '#config.startWithAudioMuted=false&config.startWithVideoMuted=' + videoMuted;
+}
+
 function updateMediaControls() {
   const voiceJoin = $('voiceJoinButton');
   const cameraJoin = $('cameraJoinButton');
-  const micToggle = $('micToggleButton');
-  const cameraToggle = $('cameraToggleButton');
   const leaveButton = $('leaveMediaButton');
   const status = $('mediaStatus');
-  if (!voiceJoin || !cameraJoin || !micToggle || !cameraToggle || !leaveButton) return;
+  if (!voiceJoin || !cameraJoin || !leaveButton) return;
 
-  const hasCall = !!state.jitsiApi;
-  voiceJoin.classList.toggle('hidden', hasCall);
-  cameraJoin.classList.toggle('hidden', hasCall);
-  micToggle.classList.toggle('hidden', !hasCall);
-  cameraToggle.classList.toggle('hidden', !hasCall);
-  leaveButton.classList.toggle('hidden', !hasCall);
-  voiceJoin.disabled = state.mediaBusy || !state.connected;
-  cameraJoin.disabled = state.mediaBusy || !state.connected;
-  micToggle.disabled = !hasCall;
-  cameraToggle.disabled = !hasCall;
-  leaveButton.disabled = !hasCall;
+  const callOpen = !!state.callWindow && !state.callWindow.closed;
+  voiceJoin.disabled = !state.connected;
+  cameraJoin.disabled = !state.connected;
+  leaveButton.classList.toggle('hidden', !callOpen);
+  leaveButton.disabled = !callOpen;
 
-  micToggle.innerHTML = '<i class="fa-solid ' + (state.callAudioMuted ? 'fa-microphone' : 'fa-microphone-slash') + ' mr-1"></i>' + (state.callAudioMuted ? 'Unmute mic' : 'Mute mic');
-  micToggle.setAttribute('aria-label', state.callAudioMuted ? 'Unmute microphone' : 'Mute microphone');
-  cameraToggle.innerHTML = '<i class="fa-solid ' + (state.callVideoMuted ? 'fa-video' : 'fa-video-slash') + ' mr-1"></i>' + (state.callVideoMuted ? 'Camera on' : 'Camera off');
-  cameraToggle.setAttribute('aria-label', state.callVideoMuted ? 'Turn camera on' : 'Turn camera off');
-
-  if (!status) return;
-  const fallbackLink = $('mediaFallbackLink');
-  if (!hasCall && fallbackLink && !fallbackLink.classList.contains('hidden')) return;
-  if (state.mediaBusy) status.textContent = 'Connecting to the hosted call…';
-  else if (!hasCall) status.textContent = 'Your microphone and camera stay off until you choose to join.';
-  else if (state.callJoined) {
-    status.textContent = 'Call connected · ' + state.callParticipantCount + ' participant' + (state.callParticipantCount === 1 ? '' : 's');
-  } else status.textContent = 'Joining hosted call…';
+  const callLink = $('mediaCallLink');
+  if (callOpen) {
+    if (status) status.textContent = 'Call opened in a new tab. Use its microphone and camera controls.';
+  } else if (status && callLink && !callLink.classList.contains('hidden')) {
+    status.textContent = 'Your browser blocked the new tab. Click the call link below.';
+  } else if (status) {
+    status.textContent = 'Your microphone and camera stay off until you join the call in a new tab.';
+  }
 }
 
 function renderMediaParticipants() {
-  const grid = $('mediaGrid');
   const empty = $('mediaEmptyState');
-  if (!grid || !empty) return;
-  const active = !!state.jitsiApi;
-  grid.classList.toggle('active', active);
-  empty.classList.toggle('hidden', active);
-  if (!active) grid.replaceChildren();
-}
-
-function hostedCallUrl(roomName = state.jitsiRoomName) {
-  return 'https://' + HOSTED_CALL_DOMAIN + '/' + encodeURIComponent(roomName);
-}
-
-function showCallFallback(message) {
-  const status = $('mediaStatus');
-  const link = $('mediaFallbackLink');
-  if (status) status.textContent = message;
-  if (link) {
-    link.href = hostedCallUrl();
-    link.classList.remove('hidden');
-  }
-}
-
-function clearCallFallback() {
-  const link = $('mediaFallbackLink');
-  if (link) {
-    link.classList.add('hidden');
-    link.removeAttribute('href');
-  }
-}
-
-function loadJitsiApi() {
-  if (window.JitsiMeetExternalAPI) return Promise.resolve(window.JitsiMeetExternalAPI);
-  if (state.jitsiApiPromise) return state.jitsiApiPromise;
-
-  state.jitsiApiPromise = new Promise((resolve, reject) => {
-    let script = document.querySelector('script[data-syncparty-jitsi]');
-    const timeout = setTimeout(() => {
-      state.jitsiApiPromise = null;
-      reject(new Error('Jitsi call service did not respond.'));
-    }, 15000);
-    const finish = () => {
-      clearTimeout(timeout);
-      if (window.JitsiMeetExternalAPI) resolve(window.JitsiMeetExternalAPI);
-      else {
-        state.jitsiApiPromise = null;
-        reject(new Error('Jitsi call service could not be loaded.'));
-      }
-    };
-    if (!script) {
-      script = document.createElement('script');
-      script.src = 'https://' + HOSTED_CALL_DOMAIN + '/external_api.js';
-      script.async = true;
-      script.dataset.syncpartyJitsi = 'true';
-      script.onload = finish;
-      script.onerror = () => {
-        clearTimeout(timeout);
-        state.jitsiApiPromise = null;
-        reject(new Error('Jitsi call service could not be loaded.'));
-      };
-      document.head.append(script);
-    } else {
-      script.addEventListener('load', finish, { once: true });
-      script.addEventListener('error', () => {
-        clearTimeout(timeout);
-        state.jitsiApiPromise = null;
-        reject(new Error('Jitsi call service could not be loaded.'));
-      }, { once: true });
-      if (window.JitsiMeetExternalAPI) finish();
-    }
-  });
-  return state.jitsiApiPromise;
-}
-
-function updateHostedCallStatus() {
-  if (!state.jitsiApi) return;
-  updateMediaControls();
-  renderMediaParticipants();
-}
-
-function onHostedCallLeft(api) {
-  if (state.jitsiApi !== api) return;
-  state.jitsiApi = null;
-  state.callJoined = false;
-  state.callParticipantCount = 0;
-  state.jitsiParticipants.clear();
-  state.jitsiLocalParticipantId = null;
-  state.callAudioMuted = false;
-  state.callVideoMuted = true;
-  if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
-  state.jitsiJoinTimer = null;
-  try { api.dispose(); } catch {}
-  clearCallFallback();
-  renderMediaParticipants();
+  const callOpen = !!state.callWindow && !state.callWindow.closed;
+  if (empty) empty.textContent = callOpen
+    ? 'Keep this page open to watch together. Join and control the call in its separate tab.'
+    : 'The call opens in a separate tab. Your watch party stays here.';
   updateMediaControls();
 }
 
-async function joinMedia(kind) {
-  if (!['audio', 'video'].includes(kind) || state.mediaBusy || state.jitsiApi) return;
+function clearCallLink() {
+  const link = $('mediaCallLink');
+  if (!link) return;
+  link.classList.add('hidden');
+  link.removeAttribute('href');
+}
+
+function showCallLink(url) {
+  const link = $('mediaCallLink');
+  if (!link) return;
+  link.href = url;
+  link.classList.remove('hidden');
+}
+
+function joinMedia(kind) {
+  if (!['audio', 'video'].includes(kind)) return;
   if (!state.connected || !state.channel) return toast('Wait until the room connects before joining voice or video.');
-  if (!window.isSecureContext) return toast('Voice and camera need a secure connection. Open SyncParty over HTTPS.');
 
-  state.mediaBusy = true;
-  const requestId = ++state.mediaRequestId;
-  const requestChannel = state.channel;
-  state.jitsiRoomName = 'syncparty-' + normalizeCode(state.code).toLowerCase();
-  clearCallFallback();
-  updateMediaControls();
+  const url = hostedCallUrl(kind);
+  const link = $('mediaCallLink');
+  if (link) link.href = url;
 
-  try {
-    const JitsiMeetExternalAPI = await loadJitsiApi();
-    if (requestId !== state.mediaRequestId || !state.connected || state.channel !== requestChannel) return;
-
-    const api = new JitsiMeetExternalAPI(HOSTED_CALL_DOMAIN, {
-      roomName: state.jitsiRoomName,
-      parentNode: $('mediaGrid'),
-      width: '100%',
-      height: '100%',
-      userInfo: { displayName: state.name },
-      configOverwrite: {
-        prejoinConfig: { enabled: false },
-        prejoinPageEnabled: false,
-        startWithAudioMuted: false,
-        startWithVideoMuted: kind !== 'video',
-        disableDeepLinking: true,
-      },
-      lang: (navigator.language || 'en').slice(0, 2),
-    });
-
-    state.jitsiApi = api;
-    state.callJoined = false;
-    state.callAudioMuted = false;
-    state.callVideoMuted = kind !== 'video';
-    state.jitsiParticipants.clear();
-    state.jitsiLocalParticipantId = null;
-    renderMediaParticipants();
+  if (state.callWindow && !state.callWindow.closed) {
+    try { state.callWindow.focus(); } catch {}
     updateMediaControls();
-
-    const on = (event, handler) => api.addListener(event, data => {
-      if (state.jitsiApi === api) handler(data || {});
-    });
-    on('videoConferenceJoined', data => {
-      state.callJoined = true;
-      state.mediaBusy = false;
-      state.jitsiLocalParticipantId = data.id || null;
-      if (data.id) state.jitsiParticipants.set(data.id, data.displayName || state.name);
-      else state.jitsiParticipants.set('local', state.name);
-      state.callParticipantCount = Math.max(1, state.jitsiParticipants.size);
-      if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
-      state.jitsiJoinTimer = null;
-      clearCallFallback();
-      updateHostedCallStatus();
-      toast(kind === 'audio' ? 'You joined voice chat.' : 'You joined with your camera on.');
-    });
-    on('participantJoined', data => {
-      if (data.id) state.jitsiParticipants.set(data.id, data.displayName || 'Guest');
-      state.callParticipantCount = Math.max(state.callJoined ? 1 : 0, state.jitsiParticipants.size);
-      updateHostedCallStatus();
-    });
-    on('participantLeft', data => {
-      if (data.id) state.jitsiParticipants.delete(data.id);
-      state.callParticipantCount = state.jitsiParticipants.size;
-      updateHostedCallStatus();
-    });
-    on('audioMuteStatusChanged', data => {
-      state.callAudioMuted = !!data.muted;
-      updateMediaControls();
-    });
-    on('videoMuteStatusChanged', data => {
-      state.callVideoMuted = !!data.muted;
-      updateMediaControls();
-    });
-    on('videoConferenceLeft', () => onHostedCallLeft(api));
-    on('readyToClose', () => onHostedCallLeft(api));
-    on('cameraError', () => showCallFallback('Camera could not start. Check browser permissions, or open the call directly.'));
-    on('micError', () => showCallFallback('Microphone could not start. Check browser permissions, or open the call directly.'));
-    on('connectionFailed', () => showCallFallback('The hosted call could not connect. Try opening it directly.'));
-    on('peerConnectionFailure', () => showCallFallback('The call connection was interrupted. Try opening it directly.'));
-
-    state.jitsiJoinTimer = setTimeout(() => {
-      if (state.jitsiApi !== api || state.callJoined) return;
-      state.mediaBusy = false;
-      showCallFallback('Still connecting? Open the call directly in a new tab.');
-      updateMediaControls();
-    }, 25000);
-  } catch (error) {
-    if (requestId === state.mediaRequestId) {
-      showCallFallback('The hosted call could not load. You can open it directly in a new tab.');
-      toast(error?.message || 'Could not load the hosted call.');
-    }
-  } finally {
-    if (requestId === state.mediaRequestId) {
-      state.mediaBusy = false;
-      updateMediaControls();
-    }
+    toast('Your call is already open. Use the call tab to turn your camera or microphone on or off.');
+    return;
   }
+
+  let callWindow = null;
+  try { callWindow = window.open(url, '_blank'); } catch {}
+  if (callWindow) {
+    try { callWindow.opener = null; } catch {}
+    state.callWindow = callWindow;
+    clearCallLink();
+    toast(kind === 'audio' ? 'Voice call opened in a new tab.' : 'Camera call opened in a new tab.');
+  } else {
+    showCallLink(url);
+    toast('Your browser blocked the new tab. Click the call link below to open it.');
+  }
+  updateMediaControls();
 }
 
-function toggleMediaTrack(kind) {
-  if (!state.jitsiApi || !['audio', 'video'].includes(kind)) return;
-  try {
-    if (kind === 'audio') {
-      state.callAudioMuted = !state.callAudioMuted;
-      state.jitsiApi.executeCommand('toggleAudio');
-    } else {
-      state.callVideoMuted = !state.callVideoMuted;
-      state.jitsiApi.executeCommand('toggleVideo');
-    }
-    updateMediaControls();
-  } catch {
-    toast('That call control is not available yet. Please try again.');
+function openHostedCallFromLink(event) {
+  joinMedia('audio');
+  if (state.callWindow && !state.callWindow.closed) {
+    event.preventDefault();
+    return false;
   }
+  return true;
 }
 
 function leaveMedia() {
-  const api = state.jitsiApi;
-  if (!api) return;
-  onHostedCallLeft(api);
-  toast('You left voice and video chat.');
+  if (state.callWindow && !state.callWindow.closed) {
+    try { state.callWindow.close(); } catch {}
+  }
+  state.callWindow = null;
+  clearCallLink();
+  updateMediaControls();
 }
 function addSystem(text, localOnly = false) {
   const stickToBottom = messagesNearBottom();
@@ -1120,25 +951,11 @@ function requestSync() {
 
 function cleanup() {
   state.playerGeneration += 1;
-  state.mediaRequestId += 1;
-  state.mediaBusy = false;
-  const call = state.jitsiApi;
-  state.jitsiApi = null;
-  state.callJoined = false;
-  state.callParticipantCount = 0;
-  state.jitsiParticipants.clear();
-  state.jitsiLocalParticipantId = null;
-  state.callAudioMuted = false;
-  state.callVideoMuted = true;
-  if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
-  state.jitsiJoinTimer = null;
-  if (call) {
-    try { call.dispose(); } catch {}
+  if (state.callWindow && !state.callWindow.closed) {
+    try { state.callWindow.close(); } catch {}
   }
-  clearCallFallback();
-  $('mediaGrid')?.replaceChildren();
-  $('mediaGrid')?.classList.remove('active');
-  $('mediaEmptyState')?.classList.remove('hidden');
+  state.callWindow = null;
+  clearCallLink();
   const frame = $('playerFrame');
   const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
   if (state.player?.webkitDisplayingFullscreen && state.player.webkitExitFullscreen) {

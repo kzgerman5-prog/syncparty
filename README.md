@@ -15,11 +15,9 @@ Room channels use Supabase's public Broadcast and Presence features. Each room h
 
 ## Voice and camera
 
-The room includes **Join voice**, **Join with camera**, microphone mute, camera on/off, and **Leave call** controls. Media stays off until a user chooses to join and grants the browser permission.
+The room includes **Open voice call** and **Open camera call** controls. Calls open in a separate tab because the free Freifunk München service refuses to load inside an embedded frame. The watch-party room code automatically creates the call link, so participants do not enter server details or configure a backend. Use the controls in the call tab to join, mute, enable the camera, or leave. If the browser blocks the new tab, SyncParty shows a direct call link.
 
-Voice and camera use an embedded Jitsi conference on the free, no-account Freifunk München service. SyncParty automatically creates the same call room from the watch-party code, so participants do not enter server details or configure a backend. The service reports a 70-person room limit but is community-operated and has no uptime guarantee. If the embedded call is blocked by a browser or network, the app offers a direct link to the same call. [Freifunk München service information](https://www.ffmuc.net/wiki/knb:meet-en).
-
-Call audio and video are processed by the Jitsi service and are not end-to-end encrypted. The provider may see connection metadata. SyncParty does not screen-share or send the watch-party video through the call; each viewer plays the video in their own YouTube or MP4 player. Supabase Realtime continues to handle room presence and chat.
+The community-operated service is free, requires no account, and supports up to 70 people per room, but it does not guarantee availability. Call audio and video are processed by the provider and are not end-to-end encrypted. SyncParty does not screen-share or send watch-party video through the call; each viewer plays the video in their own YouTube or MP4 player. [Freifunk München service information](https://www.ffmuc.net/wiki/knb:meet-en).
 ## Run locally
 
 Serve the folder over HTTP (for example, `python -m http.server 8000`) and open `http://localhost:8000`. Paste the same Supabase URL and publishable key into `config.js` first.
