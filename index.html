@@ -33,24 +33,24 @@
     }
     :root.theme-dark {
       color-scheme: dark;
-      --ink: #f0f0f7;
-      --muted: #c0c2d0;
-      --subtle: #a0a4b5;
-      --line: #3b3d50;
-      --surface: #242635;
-      --surface-raised: #2a2c3d;
-      --page: #181a26;
-      --soft: #303246;
-      --purple: #978dff;
-      --purple-hover: #a69eff;
-      --purple-soft: #393550;
+      --ink: #f2efff;
+      --muted: #c3bddb;
+      --subtle: #a9a1c2;
+      --line: #403657;
+      --surface: #241e35;
+      --surface-raised: #2d2542;
+      --page: #191326;
+      --soft: #302744;
+      --purple: #b09cff;
+      --purple-hover: #c1b1ff;
+      --purple-soft: #44365c;
       --danger: #ff8292;
       --shadow: 0 12px 36px #0003;
     }
     * { box-sizing: border-box; }
     html { min-width: 320px; background: var(--page); }
     body { min-width: 320px; min-height: 100vh; margin: 0; color: var(--ink); background: radial-gradient(ellipse at 10% 0%, #eeeaff 0, transparent 30rem), var(--page); }
-    .theme-dark body { background: radial-gradient(ellipse at 10% 0%, #27263b 0, transparent 30rem), var(--page); }
+    .theme-dark body { background: radial-gradient(ellipse at 10% 0%, #33254f 0, transparent 30rem), var(--page); }
     button, input { font: inherit; }
     button { color: inherit; cursor: pointer; touch-action: manipulation; }
     button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid #8d83ff; outline-offset: 3px; }
@@ -70,6 +70,10 @@
     .button-primary:hover { background: var(--purple-hover); }
     .button-soft { border-color: transparent; background: var(--purple-soft); color: var(--purple); }
     .button-icon { width: 42px; padding: 0; display: inline-grid; place-items: center; }
+    .theme-toggle { display: inline-flex; align-items: center; gap: 8px; border-color: #dcd5ff; background: #f1eeff; color: #5b4bc0; }
+    .theme-toggle:hover { background: #e8e3ff; }
+    .theme-dark .theme-toggle { border-color: #574873; background: #392d50; color: #d4c7ff; }
+    .theme-dark .theme-toggle:hover { background: #45365f; }
     .button-small { min-height: 34px; padding: 6px 9px; font-size: 12px; }
     .landing { width: min(100% - 32px, 1020px); margin: 0 auto; padding: clamp(42px, 8vh, 86px) 0 60px; }
     .hero { max-width: 650px; margin: 0 auto 34px; text-align: center; }
@@ -197,7 +201,7 @@
     @media (max-width: 420px) {
       .header-inner { padding-inline: 11px; }
       .button { padding-inline: 10px; }
-      .theme-label { display: none; }
+      .theme-toggle { min-height: 38px; gap: 6px; padding: 7px 9px; font-size: 11px; }
       .room-head { gap: 8px; flex-wrap: wrap; }
       .room-identity { gap: 8px; }
       .room-head .brand-mark { width: 34px; height: 34px; }
@@ -224,7 +228,7 @@
       </a>
       <div class="header-right">
         <span class="online-label"><span class="online-dot"></span>Together, in real time</span>
-        <button id="themeToggle" class="button button-icon" onclick="toggleTheme()" aria-label="Switch to dark theme" title="Switch theme"><i class="fa-solid fa-moon" aria-hidden="true"></i></button>
+        <button id="themeToggle" class="button theme-toggle" onclick="toggleTheme()" aria-label="Switch to dark purple theme" title="Switch to dark purple theme"><i class="fa-solid fa-moon" aria-hidden="true"></i><span class="theme-label">Dark / purple</span></button>
       </div>
     </div>
   </header>

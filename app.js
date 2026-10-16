@@ -43,10 +43,13 @@ function toggleTheme() {
   const dark = document.documentElement.classList.toggle('theme-dark');
   try { localStorage.setItem('syncparty-theme', dark ? 'dark' : 'light'); } catch {}
   const icon = dark ? 'fa-sun' : 'fa-moon';
-  $('themeToggle').innerHTML = '<i class="fa-solid ' + icon + '" aria-hidden="true"></i>';
-  $('themeToggle').setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+  const landingLabel = dark ? 'Light mode' : 'Dark / purple';
+  const actionLabel = dark ? 'Switch to light theme' : 'Switch to dark purple theme';
+  $('themeToggle').innerHTML = '<i class="fa-solid ' + icon + '" aria-hidden="true"></i><span class="theme-label">' + landingLabel + '</span>';
+  $('themeToggle').setAttribute('aria-label', actionLabel);
+  $('themeToggle').setAttribute('title', actionLabel);
   $('themeToggleRoom').innerHTML = '<i class="fa-solid ' + icon + '" aria-hidden="true"></i> <span class="theme-label">' + (dark ? 'Light mode' : 'Dark mode') + '</span>';
-  document.querySelector('meta[name="theme-color"]').content = dark ? '#181a26' : '#f7f8fc';
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#191326' : '#f7f8fc';
 }
 
 try { if (localStorage.getItem('syncparty-theme') === 'dark') toggleTheme(); } catch {}
