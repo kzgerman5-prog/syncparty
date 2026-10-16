@@ -34,54 +34,22 @@ const state = {
   bannedSessions: new Set(),
   pendingMentions: [],
   toastTimer: null,
-  localStream: null,
-  mediaIceServers: null,
-  mediaIceServersExpiresAt: 0,
-  mediaPeers: new Map(),
-  mediaTiles: new Map(),
+  jitsiApi: null,
+  jitsiApiPromise: null,
+  jitsiJoinTimer: null,
+  jitsiParticipants: new Map(),
+  jitsiLocalParticipantId: null,
+  jitsiRoomName: '',
+  callJoined: false,
+  callAudioMuted: false,
+  callVideoMuted: true,
+  callParticipantCount: 0,
   mediaBusy: false,
   mediaRequestId: 0,
-  mediaCapacityNoticeShown: false,
 };
 
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const MAX_MEDIA_PARTICIPANTS = 5;
-const METERED_TURN_SECRET = 'openrelayprojectsecret';
-
-async function getMediaIceServers() {
-  if (state.mediaIceServers && state.mediaIceServersExpiresAt > Date.now() + 5 * 60 * 1000) return state.mediaIceServers;
-  const fallback = [{ urls: 'stun:stun.relay.metered.ca:80' }];
-  try {
-    const expiresAt = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
-    const username = expiresAt + ':' + state.sessionId;
-    const key = await crypto.subtle.importKey(
-      'raw', new TextEncoder().encode(METERED_TURN_SECRET),
-      { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'],
-    );
-    const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(username));
-    const credential = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    state.mediaIceServers = [
-      ...fallback,
-      {
-        urls: [
-          'turn:staticauth.openrelay.metered.ca:80?transport=udp',
-          'turn:staticauth.openrelay.metered.ca:80?transport=tcp',
-          'turn:staticauth.openrelay.metered.ca:443?transport=udp',
-          'turn:staticauth.openrelay.metered.ca:443?transport=tcp',
-          'turns:staticauth.openrelay.metered.ca:443?transport=tcp',
-        ],
-        username,
-        credential,
-      },
-    ];
-    state.mediaIceServersExpiresAt = expiresAt * 1000;
-  } catch {
-    // Keep direct WebRTC available if Web Crypto is unavailable for an unusual browser.
-    state.mediaIceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-    state.mediaIceServersExpiresAt = Date.now() + 60 * 60 * 1000;
-  }
-  return state.mediaIceServers;
-}
+const HOSTED_CALL_DOMAIN = 'meet.ffmuc.net';
 
 function setTab(tab) {
   $('createTab').classList.toggle('active', tab === 'create');
@@ -219,10 +187,6 @@ function connectToRoom() {
       .on('broadcast', { event: 'system' }, ({ payload }) => addSystem(payload.text, true))
       .on('broadcast', { event: 'moderation' }, ({ payload }) => handleModeration(payload))
       .on('broadcast', { event: 'host-transfer' }, ({ payload }) => handleHostTransfer(payload))
-      .on('broadcast', { event: 'rtc-offer' }, ({ payload }) => handleRtcSignal('offer', payload))
-      .on('broadcast', { event: 'rtc-answer' }, ({ payload }) => handleRtcSignal('answer', payload))
-      .on('broadcast', { event: 'rtc-ice' }, ({ payload }) => handleRtcSignal('ice', payload))
-      .on('broadcast', { event: 'rtc-negotiate' }, ({ payload }) => handleRtcSignal('negotiate', payload))
       .on('broadcast', { event: 'sync-request' }, () => {
         if (state.role === 'host' && state.lastState) broadcast('playback', state.lastState);
       })
@@ -235,10 +199,8 @@ function connectToRoom() {
       .on('presence', { event: 'sync' }, () => {
         renderViewers();
         updateGuestPresence();
-        syncMediaPeers();
       })
       .on('presence', { event: 'join' }, ({ newPresences }) => {
-        syncMediaPeers();
         if (state.role === 'host') newPresences.forEach(person => {
           if (person.sessionId === state.sessionId) return;
           if (state.bannedSessions.has(person.sessionId)) {
@@ -247,7 +209,6 @@ function connectToRoom() {
         });
       })
       .on('presence', { event: 'leave' }, ({ leftPresences }) => {
-        syncMediaPeers();
         leftPresences.forEach(person => {
           if (person.sessionId !== state.sessionId && person.role === 'host' && state.role === 'guest') {
             addSystem('The host left the room.', true);
@@ -303,12 +264,6 @@ function presenceList() {
         sessionId: person.sessionId,
         name,
         role: person.role,
-        media: {
-          audio: person.media?.audio === true,
-          video: person.media?.video === true,
-          audioEnabled: person.media?.audioEnabled !== false,
-          videoEnabled: person.media?.videoEnabled !== false,
-        },
       });
     }
   });
@@ -452,19 +407,6 @@ async function broadcast(event, payload) {
   catch { return false; }
 }
 
-function localMediaKinds() {
-  const tracks = state.localStream?.getTracks().filter(track => track.readyState === 'live') || [];
-  return {
-    audio: tracks.some(track => track.kind === 'audio'),
-    video: tracks.some(track => track.kind === 'video'),
-  };
-}
-
-function hasLocalMedia() {
-  const kinds = localMediaKinds();
-  return kinds.audio || kinds.video;
-}
-
 async function trackPresence() {
   if (!state.channel || !state.connected) return false;
   try {
@@ -472,457 +414,268 @@ async function trackPresence() {
       sessionId: state.sessionId,
       name: state.name,
       role: state.role,
-      media: {
-        ...localMediaKinds(),
-        audioEnabled: state.localStream?.getAudioTracks().some(track => track.readyState === 'live' && track.enabled) ?? false,
-        videoEnabled: state.localStream?.getVideoTracks().some(track => track.readyState === 'live' && track.enabled) ?? false,
-      },
     });
     return result === 'ok';
   } catch { return false; }
 }
 
 function updateMediaControls() {
-  const kinds = localMediaKinds();
-  const audioTrack = state.localStream?.getAudioTracks().find(track => track.readyState === 'live');
-  const videoTrack = state.localStream?.getVideoTracks().find(track => track.readyState === 'live');
   const voiceJoin = $('voiceJoinButton');
   const cameraJoin = $('cameraJoinButton');
   const micToggle = $('micToggleButton');
   const cameraToggle = $('cameraToggleButton');
   const leaveButton = $('leaveMediaButton');
+  const status = $('mediaStatus');
   if (!voiceJoin || !cameraJoin || !micToggle || !cameraToggle || !leaveButton) return;
 
-  voiceJoin.classList.toggle('hidden', kinds.audio);
-  cameraJoin.classList.toggle('hidden', kinds.video);
-  micToggle.classList.toggle('hidden', !audioTrack);
-  cameraToggle.classList.toggle('hidden', !videoTrack);
-  leaveButton.classList.toggle('hidden', !kinds.audio && !kinds.video);
+  const hasCall = !!state.jitsiApi;
+  voiceJoin.classList.toggle('hidden', hasCall);
+  cameraJoin.classList.toggle('hidden', hasCall);
+  micToggle.classList.toggle('hidden', !hasCall);
+  cameraToggle.classList.toggle('hidden', !hasCall);
+  leaveButton.classList.toggle('hidden', !hasCall);
   voiceJoin.disabled = state.mediaBusy || !state.connected;
   cameraJoin.disabled = state.mediaBusy || !state.connected;
-  micToggle.disabled = state.mediaBusy;
-  cameraToggle.disabled = state.mediaBusy;
-  leaveButton.disabled = state.mediaBusy;
-  if (audioTrack) {
-    micToggle.innerHTML = '<i class="fa-solid ' + (audioTrack.enabled ? 'fa-microphone-slash' : 'fa-microphone') + ' mr-1"></i>' + (audioTrack.enabled ? 'Mute mic' : 'Unmute mic');
-    micToggle.setAttribute('aria-label', audioTrack.enabled ? 'Mute microphone' : 'Unmute microphone');
-  }
-  if (videoTrack) {
-    cameraToggle.innerHTML = '<i class="fa-solid ' + (videoTrack.enabled ? 'fa-video-slash' : 'fa-video') + ' mr-1"></i>' + (videoTrack.enabled ? 'Camera off' : 'Camera on');
-    cameraToggle.setAttribute('aria-label', videoTrack.enabled ? 'Turn camera off' : 'Turn camera on');
-  }
+  micToggle.disabled = !hasCall;
+  cameraToggle.disabled = !hasCall;
+  leaveButton.disabled = !hasCall;
 
-  const status = $('mediaStatus');
-  const reconnectButton = $('mediaReconnectButton');
-  if (reconnectButton) reconnectButton.classList.toggle('hidden', !Array.from(state.mediaPeers.values())
-    .some(peer => ['failed', 'disconnected'].includes(peer.pc.connectionState)));
-  if (status) {
-    if (state.mediaBusy) status.textContent = 'Preparing call and requesting device permission…';
-    else if (!hasLocalMedia()) status.textContent = 'Your microphone and camera stay off until you choose to join.';
-    else {
-      const connected = Array.from(state.mediaPeers.values()).filter(peer => peer.pc.connectionState === 'connected').length;
-      const kindsText = [kinds.audio ? 'voice' : '', kinds.video ? 'camera' : ''].filter(Boolean).join(' + ');
-      status.textContent = 'Sharing ' + kindsText + ' · ' + connected + ' peer' + (connected === 1 ? '' : 's') + ' connected';
-    }
-  }
-}
+  micToggle.innerHTML = '<i class="fa-solid ' + (state.callAudioMuted ? 'fa-microphone' : 'fa-microphone-slash') + ' mr-1"></i>' + (state.callAudioMuted ? 'Unmute mic' : 'Mute mic');
+  micToggle.setAttribute('aria-label', state.callAudioMuted ? 'Unmute microphone' : 'Mute microphone');
+  cameraToggle.innerHTML = '<i class="fa-solid ' + (state.callVideoMuted ? 'fa-video' : 'fa-video-slash') + ' mr-1"></i>' + (state.callVideoMuted ? 'Camera on' : 'Camera off');
+  cameraToggle.setAttribute('aria-label', state.callVideoMuted ? 'Turn camera on' : 'Turn camera off');
 
-async function joinMedia(kind) {
-  if (!['audio', 'video'].includes(kind) || state.mediaBusy) return;
-  if (!state.connected || !state.channel) return toast('Wait until the room connects before joining voice or video.');
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection !== 'function') {
-    return toast('Voice and camera need a secure, up-to-date browser. Open SyncParty over HTTPS.');
-  }
-  const activeOthers = presenceList().filter(person => person.sessionId !== state.sessionId
-    && (person.media.audio || person.media.video)).length;
-  if (!hasLocalMedia() && activeOthers >= MAX_MEDIA_PARTICIPANTS - 1) {
-    return toast('Voice and video are limited to five people at a time. Watching and chat still work.');
-  }
-
-  state.mediaBusy = true;
-  const requestId = ++state.mediaRequestId;
-  const requestChannel = state.channel;
-  updateMediaControls();
-  try {
-    state.mediaIceServers = await getMediaIceServers();
-    if (requestId !== state.mediaRequestId || !state.connected || state.channel !== requestChannel) return;
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: kind === 'audio' ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
-      video: kind === 'video' ? { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } } : false,
-    });
-    if (requestId !== state.mediaRequestId || !state.connected || state.channel !== requestChannel) {
-      stream.getTracks().forEach(track => track.stop());
-      return;
-    }
-    const activeCount = presenceList().filter(person => person.sessionId !== state.sessionId
-      && (person.media.audio || person.media.video)).length;
-    if (!hasLocalMedia() && activeCount >= MAX_MEDIA_PARTICIPANTS - 1) {
-      stream.getTracks().forEach(track => track.stop());
-      toast('The voice and video call filled up while you were granting permission. Watching and chat still work.');
-      return;
-    }
-    if (!state.localStream) state.localStream = new MediaStream();
-    stream.getTracks().forEach(track => {
-      state.localStream.addTrack(track);
-      const ownerChannel = state.channel;
-      track.addEventListener('ended', () => {
-        if (state.channel !== ownerChannel) return;
-        trackPresence();
-        syncMediaPeers();
-        updateMediaControls();
-      }, { once: true });
-    });
-    await trackPresence();
-    syncMediaPeers();
-    toast(kind === 'audio' ? 'You joined voice chat.' : 'Your camera is on.');
-  } catch (error) {
-    const message = error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError'
-      ? 'Microphone or camera permission was denied. Allow it in your browser settings to join.'
-      : error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError'
-        ? 'No matching microphone or camera was found.'
-        : 'Could not start your microphone or camera. Check device permissions and try again.';
-    toast(message);
-  } finally {
-    if (requestId === state.mediaRequestId) {
-      state.mediaBusy = false;
-      renderMediaParticipants();
-      updateMediaControls();
-    }
-  }
-}
-
-function toggleMediaTrack(kind) {
-  const track = state.localStream?.getTracks().find(item => item.kind === kind && item.readyState === 'live');
-  if (!track) return;
-  track.enabled = !track.enabled;
-  renderMediaParticipants();
-  updateMediaControls();
-  trackPresence();
-}
-
-function retryMediaConnections() {
-  const failedPeers = Array.from(state.mediaPeers.entries())
-    .filter(([, peer]) => peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'disconnected');
-  if (!failedPeers.length) return;
-  failedPeers.forEach(([sessionId, peer]) => {
-    peer.restartAttempted = false;
-    requestMediaIceRestart(sessionId);
-  });
-  toast('Retrying the voice and video connection…');
-}
-
-function requestMediaIceRestart(remoteSessionId) {
-  const peer = state.mediaPeers.get(remoteSessionId);
-  if (!peer || peer.restartAttempted) return;
-  peer.restartAttempted = true;
-  if (state.sessionId.localeCompare(remoteSessionId) < 0) {
-    try { peer.pc.restartIce(); } catch {}
-  } else {
-    broadcast('rtc-negotiate', {
-      fromSessionId: state.sessionId,
-      toSessionId: remoteSessionId,
-      iceRestart: true,
-    });
-  }
-}
-
-async function leaveMedia() {
-  if (!hasLocalMedia()) return;
-  stopLocalMedia();
-  await trackPresence();
-  toast('You left voice and video chat.');
-}
-
-function stopLocalMedia() {
-  const stream = state.localStream;
-  state.localStream = null;
-  if (stream) stream.getTracks().forEach(track => {
-    try { track.stop(); } catch {}
-  });
-  Array.from(state.mediaPeers.keys()).forEach(closeMediaPeer);
-  state.mediaTiles.forEach(tile => {
-    tile.audio.pause();
-    tile.audio.srcObject = null;
-    tile.video.srcObject = null;
-  });
-  state.mediaTiles.clear();
-  renderMediaParticipants();
-  updateMediaControls();
-}
-
-function mediaTile(sessionId, name, local) {
-  let tile = state.mediaTiles.get(sessionId);
-  if (tile) {
-    tile.name.textContent = local ? 'You' : name;
-    return tile;
-  }
-  const root = document.createElement('div');
-  root.className = 'media-tile';
-  const video = document.createElement('video');
-  video.autoplay = true;
-  video.playsInline = true;
-  video.muted = true;
-  video.className = 'media-video hidden';
-  const placeholder = document.createElement('div');
-  placeholder.className = 'media-avatar';
-  placeholder.textContent = (local ? state.name : name).trim().slice(0, 1).toUpperCase() || '?';
-  const audio = document.createElement('audio');
-  audio.autoplay = true;
-  audio.className = 'hidden';
-  const footer = document.createElement('div');
-  footer.className = 'media-tile-footer';
-  const label = document.createElement('span');
-  label.className = 'media-tile-name';
-  label.textContent = local ? 'You' : name;
-  const status = document.createElement('span');
-  status.className = 'media-tile-status';
-  status.textContent = local ? 'Your camera and mic' : 'Connecting…';
-  footer.append(label, status);
-  root.append(video, placeholder, audio, footer);
-  root.addEventListener('click', () => {
-    if (!local && audio.srcObject) audio.play().catch(() => {});
-  });
-  tile = { root, video, placeholder, audio, name: label, status };
-  state.mediaTiles.set(sessionId, tile);
-  return tile;
+  if (!status) return;
+  const fallbackLink = $('mediaFallbackLink');
+  if (!hasCall && fallbackLink && !fallbackLink.classList.contains('hidden')) return;
+  if (state.mediaBusy) status.textContent = 'Connecting to the hosted call…';
+  else if (!hasCall) status.textContent = 'Your microphone and camera stay off until you choose to join.';
+  else if (state.callJoined) {
+    status.textContent = 'Call connected · ' + state.callParticipantCount + ' participant' + (state.callParticipantCount === 1 ? '' : 's');
+  } else status.textContent = 'Joining hosted call…';
 }
 
 function renderMediaParticipants() {
   const grid = $('mediaGrid');
   const empty = $('mediaEmptyState');
   if (!grid || !empty) return;
-  const kinds = localMediaKinds();
-  const participants = hasLocalMedia()
-    ? presenceList().filter(person => (person.media.audio || person.media.video)
-      && (person.sessionId !== state.sessionId || hasLocalMedia()))
-    : [];
-  if (hasLocalMedia() && !participants.some(person => person.sessionId === state.sessionId)) {
-    participants.push({ sessionId: state.sessionId, name: state.name, media: kinds });
-  }
-  participants.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
-  const activeIds = new Set(participants.map(person => person.sessionId));
-  state.mediaTiles.forEach((tile, id) => {
-    if (!activeIds.has(id)) {
-      tile.audio.pause();
-      tile.audio.srcObject = null;
-      tile.video.srcObject = null;
-      state.mediaTiles.delete(id);
-    }
-  });
-  grid.replaceChildren();
-  participants.forEach(person => {
-    const local = person.sessionId === state.sessionId;
-    const tile = mediaTile(person.sessionId, person.name, local);
-    const peer = state.mediaPeers.get(person.sessionId);
-    const stream = local ? state.localStream : peer?.remoteStream;
-    if (tile.video.srcObject !== (stream || null)) tile.video.srcObject = stream || null;
-    if (tile.audio.srcObject !== (local ? null : stream || null)) {
-      tile.audio.srcObject = local ? null : stream || null;
-      if (!local && stream) tile.audio.play().catch(() => {
-        tile.status.textContent = 'Tap here to enable audio';
-      });
-    }
-    const videoTrack = stream?.getVideoTracks().find(track => track.readyState === 'live');
-    const showVideo = !!videoTrack && (local ? videoTrack.enabled : person.media.videoEnabled !== false && !videoTrack.muted);
-    tile.video.classList.toggle('hidden', !showVideo);
-    tile.placeholder.classList.toggle('hidden', showVideo);
-    if (local) {
-      tile.status.textContent = [kinds.audio ? (state.localStream.getAudioTracks().some(track => track.enabled) ? 'Mic on' : 'Mic muted') : '', kinds.video ? (videoTrack?.enabled ? 'Camera on' : 'Camera off') : ''].filter(Boolean).join(' · ');
-    } else if (!peer) tile.status.textContent = 'Connecting…';
-    else if (peer.pc.connectionState === 'failed') tile.status.textContent = 'Could not connect · retry below';
-    else if (peer.pc.connectionState === 'disconnected') tile.status.textContent = 'Reconnecting…';
-    else if (peer.pc.connectionState === 'connected') tile.status.textContent = [person.media.audio ? (person.media.audioEnabled ? 'Voice' : 'Muted') : '', person.media.video ? (person.media.videoEnabled ? 'Camera' : 'Camera off') : ''].filter(Boolean).join(' · ');
-    else tile.status.textContent = 'Connecting…';
-    grid.append(tile.root);
-  });
-  empty.classList.toggle('hidden', participants.length > 0);
+  const active = !!state.jitsiApi;
+  grid.classList.toggle('active', active);
+  empty.classList.toggle('hidden', active);
+  if (!active) grid.replaceChildren();
 }
 
-function syncMediaPeers() {
+function hostedCallUrl(roomName = state.jitsiRoomName) {
+  return 'https://' + HOSTED_CALL_DOMAIN + '/' + encodeURIComponent(roomName);
+}
+
+function showCallFallback(message) {
+  const status = $('mediaStatus');
+  const link = $('mediaFallbackLink');
+  if (status) status.textContent = message;
+  if (link) {
+    link.href = hostedCallUrl();
+    link.classList.remove('hidden');
+  }
+}
+
+function clearCallFallback() {
+  const link = $('mediaFallbackLink');
+  if (link) {
+    link.classList.add('hidden');
+    link.removeAttribute('href');
+  }
+}
+
+function loadJitsiApi() {
+  if (window.JitsiMeetExternalAPI) return Promise.resolve(window.JitsiMeetExternalAPI);
+  if (state.jitsiApiPromise) return state.jitsiApiPromise;
+
+  state.jitsiApiPromise = new Promise((resolve, reject) => {
+    let script = document.querySelector('script[data-syncparty-jitsi]');
+    const timeout = setTimeout(() => {
+      state.jitsiApiPromise = null;
+      reject(new Error('Jitsi call service did not respond.'));
+    }, 15000);
+    const finish = () => {
+      clearTimeout(timeout);
+      if (window.JitsiMeetExternalAPI) resolve(window.JitsiMeetExternalAPI);
+      else {
+        state.jitsiApiPromise = null;
+        reject(new Error('Jitsi call service could not be loaded.'));
+      }
+    };
+    if (!script) {
+      script = document.createElement('script');
+      script.src = 'https://' + HOSTED_CALL_DOMAIN + '/external_api.js';
+      script.async = true;
+      script.dataset.syncpartyJitsi = 'true';
+      script.onload = finish;
+      script.onerror = () => {
+        clearTimeout(timeout);
+        state.jitsiApiPromise = null;
+        reject(new Error('Jitsi call service could not be loaded.'));
+      };
+      document.head.append(script);
+    } else {
+      script.addEventListener('load', finish, { once: true });
+      script.addEventListener('error', () => {
+        clearTimeout(timeout);
+        state.jitsiApiPromise = null;
+        reject(new Error('Jitsi call service could not be loaded.'));
+      }, { once: true });
+      if (window.JitsiMeetExternalAPI) finish();
+    }
+  });
+  return state.jitsiApiPromise;
+}
+
+function updateHostedCallStatus() {
+  if (!state.jitsiApi) return;
+  updateMediaControls();
   renderMediaParticipants();
-  if (!hasLocalMedia() || !state.connected) {
-    Array.from(state.mediaPeers.keys()).forEach(closeMediaPeer);
-    updateMediaControls();
-    return;
-  }
-  const active = presenceList().filter(person => person.media.audio || person.media.video);
-  if (!active.some(person => person.sessionId === state.sessionId)) {
-    active.push({ sessionId: state.sessionId, name: state.name, role: state.role, media: localMediaKinds() });
-  }
-  active.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
-  if (active.length > MAX_MEDIA_PARTICIPANTS) {
-    const allowed = new Set(active.slice(0, MAX_MEDIA_PARTICIPANTS).map(person => person.sessionId));
-    if (!allowed.has(state.sessionId)) {
-      stopLocalMedia();
-      trackPresence();
-      toast('The voice and video call is full (five people). You can still watch and chat.');
-      return;
-    }
-    if (!state.mediaCapacityNoticeShown) {
-      toast('Voice and video support up to five people. Other room members can still watch and chat.');
-      state.mediaCapacityNoticeShown = true;
-    }
-  }
-  const eligible = new Set(active.filter(person => person.sessionId !== state.sessionId)
-    .slice(0, MAX_MEDIA_PARTICIPANTS - 1).map(person => person.sessionId));
-  Array.from(state.mediaPeers.keys()).forEach(sessionId => {
-    if (!eligible.has(sessionId)) closeMediaPeer(sessionId);
-  });
-  active.filter(person => person.sessionId !== state.sessionId && eligible.has(person.sessionId)).forEach(person => {
-    if (!state.mediaPeers.has(person.sessionId)) createMediaPeer(person.sessionId);
-  });
+}
+
+function onHostedCallLeft(api) {
+  if (state.jitsiApi !== api) return;
+  state.jitsiApi = null;
+  state.callJoined = false;
+  state.callParticipantCount = 0;
+  state.jitsiParticipants.clear();
+  state.jitsiLocalParticipantId = null;
+  state.callAudioMuted = false;
+  state.callVideoMuted = true;
+  if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
+  state.jitsiJoinTimer = null;
+  try { api.dispose(); } catch {}
+  clearCallFallback();
   renderMediaParticipants();
   updateMediaControls();
 }
 
-function createMediaPeer(remoteSessionId) {
-  if (typeof RTCPeerConnection !== 'function' || state.mediaPeers.has(remoteSessionId)) return state.mediaPeers.get(remoteSessionId);
-  const pc = new RTCPeerConnection({ iceServers: state.mediaIceServers || [{ urls: 'stun:stun.l.google.com:19302' }] });
-  const peer = { pc, remoteStream: new MediaStream(), makingOffer: false, offerAgain: false, pendingIce: [] };
-  state.mediaPeers.set(remoteSessionId, peer);
-  state.localStream?.getTracks().filter(track => track.readyState === 'live').forEach(track => pc.addTrack(track, state.localStream));
-  pc.onicecandidate = event => {
-    if (event.candidate) broadcast('rtc-ice', {
-      fromSessionId: state.sessionId,
-      toSessionId: remoteSessionId,
-      candidate: event.candidate.toJSON(),
+async function joinMedia(kind) {
+  if (!['audio', 'video'].includes(kind) || state.mediaBusy || state.jitsiApi) return;
+  if (!state.connected || !state.channel) return toast('Wait until the room connects before joining voice or video.');
+  if (!window.isSecureContext) return toast('Voice and camera need a secure connection. Open SyncParty over HTTPS.');
+
+  state.mediaBusy = true;
+  const requestId = ++state.mediaRequestId;
+  const requestChannel = state.channel;
+  state.jitsiRoomName = 'syncparty-' + normalizeCode(state.code).toLowerCase();
+  clearCallFallback();
+  updateMediaControls();
+
+  try {
+    const JitsiMeetExternalAPI = await loadJitsiApi();
+    if (requestId !== state.mediaRequestId || !state.connected || state.channel !== requestChannel) return;
+
+    const api = new JitsiMeetExternalAPI(HOSTED_CALL_DOMAIN, {
+      roomName: state.jitsiRoomName,
+      parentNode: $('mediaGrid'),
+      width: '100%',
+      height: '100%',
+      userInfo: { displayName: state.name },
+      configOverwrite: {
+        prejoinConfig: { enabled: false },
+        prejoinPageEnabled: false,
+        startWithAudioMuted: false,
+        startWithVideoMuted: kind !== 'video',
+        disableDeepLinking: true,
+      },
+      lang: (navigator.language || 'en').slice(0, 2),
     });
-  };
-  pc.ontrack = event => {
-    const stream = event.streams?.[0];
-    if (stream) stream.getTracks().forEach(track => {
-      if (!peer.remoteStream.getTracks().some(existing => existing.id === track.id)) peer.remoteStream.addTrack(track);
-    });
-    else if (!peer.remoteStream.getTracks().some(track => track.id === event.track.id)) peer.remoteStream.addTrack(event.track);
-    event.track.addEventListener('mute', renderMediaParticipants);
-    event.track.addEventListener('unmute', renderMediaParticipants);
-    event.track.addEventListener('ended', renderMediaParticipants);
-    renderMediaParticipants();
-  };
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected') peer.restartAttempted = false;
+
+    state.jitsiApi = api;
+    state.callJoined = false;
+    state.callAudioMuted = false;
+    state.callVideoMuted = kind !== 'video';
+    state.jitsiParticipants.clear();
+    state.jitsiLocalParticipantId = null;
     renderMediaParticipants();
     updateMediaControls();
-    if (pc.connectionState === 'failed') {
-      requestMediaIceRestart(remoteSessionId);
-      toast('The connection dropped. Trying the free network relay…');
-    }
-  };
-  pc.onnegotiationneeded = () => requestPeerNegotiation(remoteSessionId);
-  return peer;
-}
 
-function closeMediaPeer(remoteSessionId) {
-  const peer = state.mediaPeers.get(remoteSessionId);
-  if (!peer) return;
-  peer.pc.onicecandidate = null;
-  peer.pc.ontrack = null;
-  peer.pc.onconnectionstatechange = null;
-  peer.pc.onnegotiationneeded = null;
-  try { peer.pc.close(); } catch {}
-  peer.remoteStream.getTracks().forEach(track => { try { track.stop(); } catch {} });
-  state.mediaPeers.delete(remoteSessionId);
-  const tile = state.mediaTiles.get(remoteSessionId);
-  if (tile) {
-    tile.audio.pause();
-    tile.audio.srcObject = null;
-    tile.video.srcObject = null;
-    tile.root.remove();
-    state.mediaTiles.delete(remoteSessionId);
-  }
-}
-
-function requestPeerNegotiation(remoteSessionId) {
-  const peer = state.mediaPeers.get(remoteSessionId);
-  if (!peer) return;
-  if (!peer.pc.localDescription && !peer.pc.remoteDescription) {
-    if (state.sessionId.localeCompare(remoteSessionId) < 0) makePeerOffer(remoteSessionId);
-    return;
-  }
-  if (state.sessionId.localeCompare(remoteSessionId) < 0) {
-    makePeerOffer(remoteSessionId);
-  } else {
-    broadcast('rtc-negotiate', { fromSessionId: state.sessionId, toSessionId: remoteSessionId });
-  }
-}
-
-async function makePeerOffer(remoteSessionId) {
-  const peer = state.mediaPeers.get(remoteSessionId);
-  if (!peer || peer.makingOffer || peer.pc.signalingState !== 'stable') {
-    if (peer) peer.offerAgain = true;
-    return;
-  }
-  peer.makingOffer = true;
-  try {
-    const offer = await peer.pc.createOffer();
-    if (peer.pc.signalingState !== 'stable') return;
-    await peer.pc.setLocalDescription(offer);
-    await broadcast('rtc-offer', {
-      fromSessionId: state.sessionId,
-      toSessionId: remoteSessionId,
-      description: { type: peer.pc.localDescription.type, sdp: peer.pc.localDescription.sdp },
+    const on = (event, handler) => api.addListener(event, data => {
+      if (state.jitsiApi === api) handler(data || {});
     });
-  } catch {
-    toast('Could not start a peer voice or video connection. Try leaving and rejoining media.');
+    on('videoConferenceJoined', data => {
+      state.callJoined = true;
+      state.mediaBusy = false;
+      state.jitsiLocalParticipantId = data.id || null;
+      if (data.id) state.jitsiParticipants.set(data.id, data.displayName || state.name);
+      else state.jitsiParticipants.set('local', state.name);
+      state.callParticipantCount = Math.max(1, state.jitsiParticipants.size);
+      if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
+      state.jitsiJoinTimer = null;
+      clearCallFallback();
+      updateHostedCallStatus();
+      toast(kind === 'audio' ? 'You joined voice chat.' : 'You joined with your camera on.');
+    });
+    on('participantJoined', data => {
+      if (data.id) state.jitsiParticipants.set(data.id, data.displayName || 'Guest');
+      state.callParticipantCount = Math.max(state.callJoined ? 1 : 0, state.jitsiParticipants.size);
+      updateHostedCallStatus();
+    });
+    on('participantLeft', data => {
+      if (data.id) state.jitsiParticipants.delete(data.id);
+      state.callParticipantCount = state.jitsiParticipants.size;
+      updateHostedCallStatus();
+    });
+    on('audioMuteStatusChanged', data => {
+      state.callAudioMuted = !!data.muted;
+      updateMediaControls();
+    });
+    on('videoMuteStatusChanged', data => {
+      state.callVideoMuted = !!data.muted;
+      updateMediaControls();
+    });
+    on('videoConferenceLeft', () => onHostedCallLeft(api));
+    on('readyToClose', () => onHostedCallLeft(api));
+    on('cameraError', () => showCallFallback('Camera could not start. Check browser permissions, or open the call directly.'));
+    on('micError', () => showCallFallback('Microphone could not start. Check browser permissions, or open the call directly.'));
+    on('connectionFailed', () => showCallFallback('The hosted call could not connect. Try opening it directly.'));
+    on('peerConnectionFailure', () => showCallFallback('The call connection was interrupted. Try opening it directly.'));
+
+    state.jitsiJoinTimer = setTimeout(() => {
+      if (state.jitsiApi !== api || state.callJoined) return;
+      state.mediaBusy = false;
+      showCallFallback('Still connecting? Open the call directly in a new tab.');
+      updateMediaControls();
+    }, 25000);
+  } catch (error) {
+    if (requestId === state.mediaRequestId) {
+      showCallFallback('The hosted call could not load. You can open it directly in a new tab.');
+      toast(error?.message || 'Could not load the hosted call.');
+    }
   } finally {
-    peer.makingOffer = false;
-    if (peer.offerAgain) {
-      peer.offerAgain = false;
-      setTimeout(() => makePeerOffer(remoteSessionId), 0);
+    if (requestId === state.mediaRequestId) {
+      state.mediaBusy = false;
+      updateMediaControls();
     }
   }
 }
 
-async function handleRtcSignal(kind, payload) {
-  if (!payload || payload.toSessionId !== state.sessionId || typeof payload.fromSessionId !== 'string'
-    || payload.fromSessionId === state.sessionId || !state.connected || !hasLocalMedia()) return;
-  const remote = presenceList().find(person => person.sessionId === payload.fromSessionId
-    && (person.media.audio || person.media.video));
-  if (!remote) return;
-  if (kind === 'negotiate') {
-    if (state.sessionId.localeCompare(remote.sessionId) < 0) {
-      if (payload.iceRestart) {
-        const peer = createMediaPeer(remote.sessionId);
-        if (peer) peer.restartAttempted = true;
-        try { peer?.pc.restartIce(); } catch {}
-      } else await makePeerOffer(remote.sessionId);
-    }
-    return;
-  }
-  const peer = createMediaPeer(remote.sessionId);
-  if (!peer) return;
-  const pc = peer.pc;
+function toggleMediaTrack(kind) {
+  if (!state.jitsiApi || !['audio', 'video'].includes(kind)) return;
   try {
-    if (kind === 'offer') {
-      if (state.sessionId.localeCompare(remote.sessionId) < 0 || !payload.description?.sdp
-        || payload.description.sdp.length > 100000 || pc.signalingState !== 'stable') return;
-      await pc.setRemoteDescription(payload.description);
-      for (const candidate of peer.pendingIce.splice(0)) await pc.addIceCandidate(candidate);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await broadcast('rtc-answer', {
-        fromSessionId: state.sessionId,
-        toSessionId: remote.sessionId,
-        description: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
-      });
-    } else if (kind === 'answer') {
-      if (state.sessionId.localeCompare(remote.sessionId) > 0 || !payload.description?.sdp
-        || payload.description.sdp.length > 100000 || pc.signalingState !== 'have-local-offer') return;
-      await pc.setRemoteDescription(payload.description);
-      for (const candidate of peer.pendingIce.splice(0)) await pc.addIceCandidate(candidate);
-      if (peer.offerAgain) {
-        peer.offerAgain = false;
-        setTimeout(() => makePeerOffer(remote.sessionId), 0);
-      }
-    } else if (kind === 'ice' && payload.candidate) {
-      if (pc.remoteDescription) await pc.addIceCandidate(payload.candidate);
-      else if (peer.pendingIce.length < 100) peer.pendingIce.push(payload.candidate);
+    if (kind === 'audio') {
+      state.callAudioMuted = !state.callAudioMuted;
+      state.jitsiApi.executeCommand('toggleAudio');
+    } else {
+      state.callVideoMuted = !state.callVideoMuted;
+      state.jitsiApi.executeCommand('toggleVideo');
     }
+    updateMediaControls();
   } catch {
-    renderMediaParticipants();
+    toast('That call control is not available yet. Please try again.');
   }
 }
 
+function leaveMedia() {
+  const api = state.jitsiApi;
+  if (!api) return;
+  onHostedCallLeft(api);
+  toast('You left voice and video chat.');
+}
 function addSystem(text, localOnly = false) {
   const stickToBottom = messagesNearBottom();
   const item = document.createElement('div');
@@ -1369,12 +1122,23 @@ function cleanup() {
   state.playerGeneration += 1;
   state.mediaRequestId += 1;
   state.mediaBusy = false;
-  stopLocalMedia();
-  state.mediaTiles.forEach(tile => tile.root.remove());
-  state.mediaTiles.clear();
+  const call = state.jitsiApi;
+  state.jitsiApi = null;
+  state.callJoined = false;
+  state.callParticipantCount = 0;
+  state.jitsiParticipants.clear();
+  state.jitsiLocalParticipantId = null;
+  state.callAudioMuted = false;
+  state.callVideoMuted = true;
+  if (state.jitsiJoinTimer) clearTimeout(state.jitsiJoinTimer);
+  state.jitsiJoinTimer = null;
+  if (call) {
+    try { call.dispose(); } catch {}
+  }
+  clearCallFallback();
   $('mediaGrid')?.replaceChildren();
+  $('mediaGrid')?.classList.remove('active');
   $('mediaEmptyState')?.classList.remove('hidden');
-  state.mediaCapacityNoticeShown = false;
   const frame = $('playerFrame');
   const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
   if (state.player?.webkitDisplayingFullscreen && state.player.webkitExitFullscreen) {
@@ -1391,9 +1155,9 @@ function cleanup() {
   state.lastState = null;
   state.ready = false;
   state.chatSeen.clear();
+  updateMediaControls();
   updateFullscreenButton();
 }
-
 async function leaveRoom() {
   if (state.role === 'host') await broadcast('end', {});
   cleanup();

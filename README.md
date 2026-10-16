@@ -15,10 +15,11 @@ Room channels use Supabase's public Broadcast and Presence features. Each room h
 
 ## Voice and camera
 
-The room includes **Join voice**, **Join with camera**, microphone mute, camera on/off, and **Leave call** controls. Media stays off until a user chooses a control and grants the browser permission. Camera preview and remote video appear in the room's media panel. The browser's `getUserMedia()` API requires a secure context such as GitHub Pages over HTTPS or `localhost`.
+The room includes **Join voice**, **Join with camera**, microphone mute, camera on/off, and **Leave call** controls. Media stays off until a user chooses to join and grants the browser permission.
 
-Calls use browser WebRTC peer-to-peer connections. The existing Supabase Realtime channel carries only call setup messages; audio and video travel directly between participants when possible, and SyncParty automatically tries Metered's free Open Relay TURN service when a network blocks the direct route. No account, key, or server details are needed from room participants. The relay is provided free with a 20 GB monthly usage limit; when that service limit is reached, calls may again depend on a direct route. Direct WebRTC calls can reveal a participant's public network address to other call participants; the relay can see connection metadata but not decrypt WebRTC media. The media call supports up to five participants to keep mesh connections and bandwidth use small. Supabase Realtime remains subject to the limits of the existing Supabase project.
+Voice and camera use an embedded Jitsi conference on the free, no-account Freifunk München service. SyncParty automatically creates the same call room from the watch-party code, so participants do not enter server details or configure a backend. The service reports a 70-person room limit but is community-operated and has no uptime guarantee. If the embedded call is blocked by a browser or network, the app offers a direct link to the same call. [Freifunk München service information](https://www.ffmuc.net/wiki/knb:meet-en).
 
+Call audio and video are processed by the Jitsi service and are not end-to-end encrypted. The provider may see connection metadata. SyncParty does not screen-share or send the watch-party video through the call; each viewer plays the video in their own YouTube or MP4 player. Supabase Realtime continues to handle room presence and chat.
 ## Run locally
 
 Serve the folder over HTTP (for example, `python -m http.server 8000`) and open `http://localhost:8000`. Paste the same Supabase URL and publishable key into `config.js` first.
