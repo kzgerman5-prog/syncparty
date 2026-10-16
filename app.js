@@ -1,21 +1,38 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
+function getSessionId() {
+  try {
+    let id = sessionStorage.getItem('syncparty-session');
+    if (!id) {
+      id = crypto.randomUUID();
+      sessionStorage.setItem('syncparty-session', id);
+    }
+    return id;
+  } catch { return crypto.randomUUID(); }
+}
+
 const state = {
   role: null,
+  hostSessionId: null,
   code: '',
   name: '',
-  sessionId: crypto.randomUUID(),
+  sessionId: getSessionId(),
   client: null,
   channel: null,
   connected: false,
   mode: 'youtube',
   video: null,
   player: null,
+  playerGeneration: 0,
   ready: false,
   suppress: false,
   lastState: null,
   chatSeen: new Set(),
+  mentionCandidates: [],
+  mentionIndex: 0,
+  bannedSessions: new Set(),
+  pendingMentions: [],
   toastTimer: null,
 };
 
@@ -79,6 +96,13 @@ function showRoom() {
   $('landing').classList.add('hidden');
   $('room').classList.remove('hidden');
   $('roomCodeDisplay').textContent = state.code;
+  updateRoleUI();
+  renderViewers();
+  addSystem(state.role === 'host' ? 'You started the party.' : 'You joined the party.', true);
+}
+
+function updateRoleUI() {
+  if (state.role === 'host') state.hostSessionId = state.sessionId;
   $('roleBadge').innerHTML = state.role === 'host'
     ? '<i class="fa-solid fa-crown mr-1"></i>Host'
     : '<i class="fa-solid fa-eye mr-1"></i>Viewer';
@@ -86,8 +110,11 @@ function showRoom() {
   $('hostPlayback').classList.toggle('hidden', state.role !== 'host');
   $('guestBar').classList.toggle('hidden', state.role !== 'guest');
   $('resyncBtn').classList.toggle('hidden', state.role !== 'guest');
+  const frame = $('playerFrame');
+  if (frame) frame.classList.toggle('guest-view', state.role !== 'host');
+  if (state.video?.mode === 'mp4' && state.player) state.player.controls = state.role === 'host';
   renderViewers();
-  addSystem(state.role === 'host' ? 'You started the party.' : 'You joined the party.', true);
+  updateFullscreenButton();
 }
 
 function createRoom() {
@@ -100,6 +127,7 @@ function createRoom() {
   state.name = name;
   state.role = 'host';
   state.code = makeCode();
+  state.bannedSessions = new Set();
   showRoom();
   connectToRoom();
 }
@@ -120,6 +148,7 @@ function joinRoom() {
   state.name = name;
   state.role = 'guest';
   state.code = 'PARTY-' + code;
+  state.bannedSessions = new Set();
   showRoom();
   connectToRoom();
 }
@@ -141,6 +170,8 @@ function connectToRoom() {
       .on('broadcast', { event: 'playback' }, ({ payload }) => applyState(payload))
       .on('broadcast', { event: 'chat' }, ({ payload }) => renderChat(payload))
       .on('broadcast', { event: 'system' }, ({ payload }) => addSystem(payload.text, true))
+      .on('broadcast', { event: 'moderation' }, ({ payload }) => handleModeration(payload))
+      .on('broadcast', { event: 'host-transfer' }, ({ payload }) => handleHostTransfer(payload))
       .on('broadcast', { event: 'sync-request' }, () => {
         if (state.role === 'host' && state.lastState) broadcast('playback', state.lastState);
       })
@@ -156,7 +187,10 @@ function connectToRoom() {
       })
       .on('presence', { event: 'join' }, ({ newPresences }) => {
         if (state.role === 'host') newPresences.forEach(person => {
-          if (person.sessionId !== state.sessionId) addSystem((person.name || 'A viewer') + ' joined the party.');
+          if (person.sessionId === state.sessionId) return;
+          if (state.bannedSessions.has(person.sessionId)) {
+            broadcast('moderation', { action: 'ban', targetSessionId: person.sessionId, actorSessionId: state.sessionId });
+          } else addSystem((person.name || 'A viewer') + ' joined the party.');
         });
       })
       .on('presence', { event: 'leave' }, ({ leftPresences }) => {
@@ -180,6 +214,7 @@ function connectToRoom() {
             toast('Room ready — share the invite link!');
             addSystem('Room is ready. Share the invite link to bring everyone in.');
             if (state.lastState) broadcast('playback', state.lastState);
+            enforceRoomBans();
           }
           renderViewers();
         } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(status)) {
@@ -207,14 +242,19 @@ function presenceList() {
   const entries = Object.values(state.channel.presenceState()).flat();
   const unique = new Map();
   entries.forEach(person => {
-    if (person?.sessionId) unique.set(person.sessionId, { name: person.name || 'Viewer', role: person.role });
+    if (typeof person?.sessionId === 'string' && person.sessionId) {
+      const name = typeof person.name === 'string' && person.name.trim() ? person.name.trim().slice(0, 24) : 'Viewer';
+      unique.set(person.sessionId, { sessionId: person.sessionId, name, role: person.role });
+    }
   });
   return Array.from(unique.values());
 }
 
 function updateGuestPresence() {
   if (state.role !== 'guest' || !state.connected) return;
-  const hostOnline = presenceList().some(person => person.role === 'host');
+  const host = presenceList().find(person => person.role === 'host');
+  if (host) state.hostSessionId = host.sessionId;
+  const hostOnline = !!host;
   setGuestStatus(hostOnline, hostOnline ? 'Connected to host' : 'Waiting for the host…');
 }
 
@@ -236,9 +276,100 @@ function renderViewers() {
     tag.className = 'text-[9px] font-bold text-[#8179db]';
     tag.textContent = viewer.role === 'host' ? 'HOST' : '';
     chip.append(avatar, label, tag);
+    if (state.role === 'host' && viewer.sessionId !== state.sessionId && viewer.role !== 'host') {
+      const actions = document.createElement('select');
+      actions.className = 'member-actions';
+      actions.setAttribute('aria-label', 'Manage ' + viewer.name);
+      actions.innerHTML = '<option value="">Manage</option><option value="remove">Remove</option><option value="ban">Ban</option><option value="transfer">Make host</option>';
+      actions.addEventListener('change', () => {
+        const action = actions.value;
+        actions.value = '';
+        if (action) moderateMember(viewer, action);
+      });
+      chip.append(actions);
+    }
     el.append(chip);
   });
   $('viewerCount').textContent = viewers.length + ' here';
+}
+
+function enforceRoomBans() {
+  if (state.role !== 'host') return;
+  presenceList().forEach(viewer => {
+    if (viewer.sessionId !== state.sessionId && state.bannedSessions.has(viewer.sessionId)) {
+      broadcast('moderation', { action: 'ban', targetSessionId: viewer.sessionId, actorSessionId: state.sessionId });
+    }
+  });
+}
+
+async function moderateMember(viewer, action) {
+  if (state.role !== 'host' || !viewer?.sessionId || viewer.sessionId === state.sessionId || viewer.role === 'host') return;
+  const subject = viewer.name || 'this viewer';
+  const verb = action === 'remove' ? 'Remove' : action === 'ban' ? 'Ban' : action === 'transfer' ? 'Transfer host to' : '';
+  if (!verb || !window.confirm(verb + ' ' + subject + '?')) return;
+
+  if (action === 'transfer') {
+    const sent = await broadcast('host-transfer', {
+      fromSessionId: state.sessionId,
+      toSessionId: viewer.sessionId,
+      toName: subject,
+      bannedSessionIds: Array.from(state.bannedSessions),
+    });
+    if (!sent) return toast('Host transfer could not be sent. Try again.');
+    state.role = 'guest';
+    state.hostSessionId = null;
+    updateRoleUI();
+    try { await state.channel.track({ sessionId: state.sessionId, name: state.name, role: state.role }); } catch {}
+    updateGuestPresence();
+    toast('Host role transferred to ' + subject + '.');
+    return;
+  }
+
+  if (action === 'ban') {
+    state.bannedSessions.add(viewer.sessionId);
+  }
+  const sent = await broadcast('moderation', {
+    action,
+    targetSessionId: viewer.sessionId,
+    actorSessionId: state.sessionId,
+  });
+  if (!sent) {
+    if (action === 'ban') state.bannedSessions.delete(viewer.sessionId);
+    return toast('Could not send the moderation action. Try again.');
+  }
+  addSystem(subject + (action === 'ban' ? ' was banned from this room.' : ' was removed from this room.'), true);
+  toast(action === 'ban' ? subject + ' was banned.' : subject + ' was removed.');
+}
+
+function isCurrentHost(sessionId) {
+  return presenceList().some(person => person.sessionId === sessionId && person.role === 'host');
+}
+
+function handleModeration(payload) {
+  if (!payload || payload.targetSessionId !== state.sessionId || !isCurrentHost(payload.actorSessionId)) return;
+  const notice = payload.action === 'ban'
+    ? 'The host banned you from this room.'
+    : payload.action === 'remove'
+      ? 'The host removed you from this room.'
+      : '';
+  if (!notice) return;
+  cleanup();
+  backToLanding();
+  toast(notice);
+}
+
+async function handleHostTransfer(payload) {
+  if (!payload?.fromSessionId || payload.fromSessionId !== state.hostSessionId
+    || payload.toSessionId !== state.sessionId || state.role !== 'guest') return;
+  state.bannedSessions = new Set(Array.isArray(payload.bannedSessionIds)
+    ? payload.bannedSessionIds.filter(id => typeof id === 'string').slice(0, 200)
+    : []);
+  state.role = 'host';
+  updateRoleUI();
+  try { await state.channel.track({ sessionId: state.sessionId, name: state.name, role: state.role }); } catch {}
+  addSystem(state.name + ' is now the host.');
+  if (state.lastState) broadcast('playback', state.lastState);
+  toast('You are now the host.');
 }
 
 function setGuestStatus(ok, text) {
@@ -250,17 +381,19 @@ function setGuestStatus(ok, text) {
   if (retry) retry.classList.toggle('hidden', ok || text === 'Connecting to room…' || text === 'Waiting for the host…');
 }
 
-function broadcast(event, payload) {
-  if (!state.channel || !state.connected) return Promise.resolve(false);
-  return state.channel.send({ type: 'broadcast', event, payload }).then(status => status === 'ok');
+async function broadcast(event, payload) {
+  if (!state.channel || !state.connected) return false;
+  try { return (await state.channel.send({ type: 'broadcast', event, payload })) === 'ok'; }
+  catch { return false; }
 }
 
 function addSystem(text, localOnly = false) {
+  const stickToBottom = messagesNearBottom();
   const item = document.createElement('div');
   item.className = 'text-center text-[11px] text-[#9a9eac] py-1';
   item.textContent = text;
   $('messages').append(item);
-  scrollMessages();
+  scrollMessages(stickToBottom);
   if (!localOnly && state.role === 'host') broadcast('system', { text });
 }
 
@@ -269,6 +402,7 @@ function renderChat(message) {
   state.chatSeen.add(message.id);
   if (state.chatSeen.size > 300) state.chatSeen.delete(state.chatSeen.values().next().value);
   const mine = message.sessionId === state.sessionId;
+  const stickToBottom = messagesNearBottom();
   const row = document.createElement('div');
   row.className = 'flex ' + (mine ? 'justify-end' : 'justify-start');
   const box = document.createElement('div');
@@ -281,11 +415,116 @@ function renderChat(message) {
   box.append(meta, body);
   row.append(box);
   $('messages').append(row);
-  scrollMessages();
+  scrollMessages(stickToBottom);
+  if (!mine && Array.isArray(message.mentionSessionIds) && message.mentionSessionIds.includes(state.sessionId)) {
+    notifyMention(message);
+  }
 }
 
-function scrollMessages() {
-  $('messages').scrollTop = $('messages').scrollHeight;
+function messagesNearBottom() {
+  const messages = $('messages');
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 48;
+}
+
+function scrollMessages(force = false) {
+  if (force) $('messages').scrollTop = $('messages').scrollHeight;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function mentionsInMessage(text) {
+  let remaining = text;
+  const mentioned = [];
+  const candidates = presenceList()
+    .filter(person => person.sessionId !== state.sessionId && person.name.trim())
+    .sort((a, b) => b.name.length - a.name.length);
+  candidates.forEach(person => {
+    const pattern = '(^|[\\s(])@' + escapeRegExp(person.name.trim()) + '(?=$|[\\s.,!?;:)])';
+    if (!new RegExp(pattern, 'i').test(remaining)) return;
+    mentioned.push(person.sessionId);
+    remaining = remaining.replace(new RegExp(pattern, 'gi'), '$1@');
+  });
+  return mentioned;
+}
+
+function notifyMention(message) {
+  const sender = message.name || 'Someone';
+  const presentationActive = document.hidden || document.fullscreenElement || document.webkitFullscreenElement;
+  if (!presentationActive) {
+    toast(sender + ' mentioned you in chat.');
+    return;
+  }
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification('Mention in SyncParty', { body: sender + ': ' + String(message.text || '').slice(0, 120) }); return; } catch {}
+  }
+  if (state.pendingMentions.length < 50) state.pendingMentions.push(sender);
+}
+
+function showPendingMentions() {
+  if (document.hidden || document.fullscreenElement || document.webkitFullscreenElement || !state.pendingMentions.length) return;
+  const senders = Array.from(new Set(state.pendingMentions.splice(0)));
+  toast((senders.length === 1 ? senders[0] : senders.join(', ')) + ' mentioned you in chat.');
+}
+
+function updateMentionSuggestions() {
+  const input = $('chatInput');
+  const popup = $('mentionSuggestions');
+  const beforeCursor = input.value.slice(0, input.selectionStart);
+  const match = /(^|\s)@([^\s@]*)$/.exec(beforeCursor);
+  if (!match) {
+    state.mentionCandidates = [];
+    popup.classList.add('hidden');
+    popup.replaceChildren();
+    return;
+  }
+  const prefix = match[2].toLocaleLowerCase();
+  const candidates = presenceList().filter(person => person.sessionId !== state.sessionId
+    && person.name.toLocaleLowerCase().startsWith(prefix));
+  state.mentionCandidates = candidates;
+  state.mentionIndex = 0;
+  popup.replaceChildren();
+  candidates.forEach((person, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'mention-option' + (index === 0 ? ' active' : '');
+    option.setAttribute('role', 'option');
+    option.textContent = '@' + person.name;
+    option.addEventListener('mousedown', event => event.preventDefault());
+    option.addEventListener('click', () => insertMention(person.name));
+    popup.append(option);
+  });
+  popup.classList.toggle('hidden', candidates.length === 0);
+}
+
+function insertMention(name) {
+  const input = $('chatInput');
+  const beforeCursor = input.value.slice(0, input.selectionStart);
+  const match = /(^|\s)@([^\s@]*)$/.exec(beforeCursor);
+  if (!match) return false;
+  const start = beforeCursor.length - match[0].length + match[1].length;
+  input.setRangeText('@' + name + ' ', start, input.selectionStart, 'end');
+  $('mentionSuggestions').classList.add('hidden');
+  input.focus();
+  updateMentionSuggestions();
+  return true;
+}
+
+function moveMentionSelection(direction) {
+  const popup = $('mentionSuggestions');
+  if (popup.classList.contains('hidden') || !state.mentionCandidates.length) return false;
+  state.mentionIndex = (state.mentionIndex + direction + state.mentionCandidates.length) % state.mentionCandidates.length;
+  popup.querySelectorAll('.mention-option').forEach((option, index) => {
+    option.classList.toggle('active', index === state.mentionIndex);
+  });
+  return true;
+}
+
+function acceptMentionSelection() {
+  const person = state.mentionCandidates[state.mentionIndex];
+  if (!person) return false;
+  return insertMention(person.name);
 }
 
 function sendChat(event) {
@@ -293,10 +532,18 @@ function sendChat(event) {
   const text = $('chatInput').value.trim().slice(0, 500);
   if (!text) return;
   if (!state.connected) return toast('Wait for the room to connect before chatting.');
-  const message = { id: crypto.randomUUID(), sessionId: state.sessionId, name: state.name, text, time: Date.now() };
+  const message = {
+    id: crypto.randomUUID(),
+    sessionId: state.sessionId,
+    name: state.name,
+    text,
+    time: Date.now(),
+    mentionSessionIds: mentionsInMessage(text),
+  };
   renderChat(message);
   broadcast('chat', message);
   $('chatInput').value = '';
+  updateMentionSuggestions();
 }
 
 async function copyText(value, successText) {
@@ -368,17 +615,59 @@ function showUrlError(message) {
   $('urlError').classList.remove('hidden');
 }
 
+function updateFullscreenButton() {
+  const button = $('fullscreenToggle');
+  const frame = $('playerFrame');
+  if (!button || !frame) return;
+  const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
+  const isFullscreen = !!activeElement && (activeElement === frame || frame.contains(activeElement))
+    || !!state.player?.webkitDisplayingFullscreen;
+  button.disabled = !state.video && !isFullscreen;
+  button.innerHTML = '<i class="fa-solid ' + (isFullscreen ? 'fa-compress' : 'fa-expand') + '" aria-hidden="true"></i><span>' + (isFullscreen ? 'Minimise' : 'Full screen') + '</span>';
+  button.setAttribute('aria-label', isFullscreen ? 'Exit full screen and minimise video' : 'Make video full screen');
+  button.setAttribute('title', isFullscreen ? 'Minimise video' : 'Full screen');
+}
+
+async function toggleFullscreen() {
+  const frame = $('playerFrame');
+  const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
+  const isFullscreen = !!activeElement && (activeElement === frame || frame.contains(activeElement))
+    || !!state.player?.webkitDisplayingFullscreen;
+  try {
+    if (isFullscreen) {
+      if (state.player?.webkitDisplayingFullscreen && state.player.webkitExitFullscreen) state.player.webkitExitFullscreen();
+      else if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    } else if (frame.requestFullscreen) await frame.requestFullscreen();
+    else if (frame.webkitRequestFullscreen) frame.webkitRequestFullscreen();
+    else if (state.video?.mode === 'mp4' && state.player?.webkitEnterFullscreen) state.player.webkitEnterFullscreen();
+    else toast('Full screen is not supported by this browser.');
+  } catch { toast('Could not change full screen mode. Try the video player controls.'); }
+  updateFullscreenButton();
+}
+
 function mountVideo(video) {
   state.ready = false;
   state.suppress = true;
+  const generation = ++state.playerGeneration;
+  if (state.player?.destroy) {
+    try { state.player.destroy(); } catch {}
+  } else if (state.player?.tagName === 'VIDEO') {
+    try { state.player.pause(); state.player.removeAttribute('src'); state.player.load(); } catch {}
+  }
+  state.player = null;
   const frame = $('playerFrame');
+  const fullscreenButton = $('fullscreenToggle');
   frame.replaceChildren();
+  if (fullscreenButton) frame.append(fullscreenButton);
   if (video.mode === 'mp4') {
     const player = document.createElement('video');
     player.controls = state.role === 'host';
     player.playsInline = true;
     player.preload = 'metadata';
     player.src = video.url;
+    player.addEventListener('webkitbeginfullscreen', updateFullscreenButton);
+    player.addEventListener('webkitendfullscreen', updateFullscreenButton);
     player.addEventListener('loadedmetadata', () => {
       state.ready = true;
       state.suppress = false;
@@ -393,14 +682,19 @@ function mountVideo(video) {
       toast('This MP4 link is unavailable to one or more viewers. Try a public video link.');
     });
     frame.append(player);
+    if (fullscreenButton) frame.append(fullscreenButton);
     state.player = player;
+    updateFullscreenButton();
     return;
   }
   const box = document.createElement('div');
   box.id = 'ytPlayer';
   box.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
   frame.append(box);
+  if (fullscreenButton) frame.append(fullscreenButton);
+  updateFullscreenButton();
   loadYouTubeApi().then(() => {
+    if (generation !== state.playerGeneration) return;
     state.player = new YT.Player('ytPlayer', {
       videoId: video.id,
       width: '100%',
@@ -426,7 +720,9 @@ function mountVideo(video) {
         },
       },
     });
-  }).catch(() => toast('The YouTube player could not load. Check your internet connection.'));
+  }).catch(() => {
+    if (generation === state.playerGeneration) toast('The YouTube player could not load. Check your internet connection.');
+  });
 }
 
 let ytPromise;
@@ -534,6 +830,15 @@ function requestSync() {
 }
 
 function cleanup() {
+  state.playerGeneration += 1;
+  const frame = $('playerFrame');
+  const activeElement = document.fullscreenElement || document.webkitFullscreenElement;
+  if (state.player?.webkitDisplayingFullscreen && state.player.webkitExitFullscreen) {
+    try { state.player.webkitExitFullscreen(); } catch {}
+  } else if (activeElement && frame?.contains(activeElement)) {
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
   if (state.channel && state.client) state.client.removeChannel(state.channel);
   state.channel = null;
   state.connected = false;
@@ -542,6 +847,7 @@ function cleanup() {
   state.lastState = null;
   state.ready = false;
   state.chatSeen.clear();
+  updateFullscreenButton();
 }
 
 async function leaveRoom() {
@@ -557,7 +863,8 @@ function backToLanding() {
   state.role = null;
   state.code = '';
   $('messages').replaceChildren();
-  $('playerFrame').innerHTML = '<div class="placeholder"><div class="w-[58px] h-[58px] rounded-2xl bg-white/10 grid place-items-center mx-auto mb-3 text-white"><i class="fa-solid fa-play ml-1"></i></div><div class="font-semibold text-sm text-white">Your watch party starts here</div><div class="text-xs text-[#a9adba] mt-1">The host can load a video anytime</div></div>';
+  $('playerFrame').innerHTML = '<div class="placeholder"><div class="w-[58px] h-[58px] rounded-2xl bg-white/10 grid place-items-center mx-auto mb-3 text-white"><i class="fa-solid fa-play ml-1"></i></div><div class="font-semibold text-sm text-white">Your watch party starts here</div><div class="text-xs text-[#a9adba] mt-1">The host can load a video anytime</div></div><button id="fullscreenToggle" class="fullscreen-toggle" type="button" onclick="toggleFullscreen()" aria-label="Enter full screen" title="Enter full screen" disabled><i class="fa-solid fa-expand" aria-hidden="true"></i><span>Full screen</span></button>';
+  updateFullscreenButton();
 }
 
 $('roomCode').addEventListener('input', event => {
@@ -566,6 +873,28 @@ $('roomCode').addEventListener('input', event => {
 });
 $('roomCode').addEventListener('keydown', event => { if (event.key === 'Enter') joinRoom(); });
 $('videoUrl').addEventListener('keydown', event => { if (event.key === 'Enter') loadVideo(); });
+$('chatInput').addEventListener('input', updateMentionSuggestions);
+$('chatInput').addEventListener('keydown', event => {
+  const popupOpen = !$('mentionSuggestions').classList.contains('hidden');
+  if (popupOpen && event.key === 'ArrowDown') {
+    event.preventDefault();
+    moveMentionSelection(1);
+  } else if (popupOpen && event.key === 'ArrowUp') {
+    event.preventDefault();
+    moveMentionSelection(-1);
+  } else if (popupOpen && event.key === 'Enter' && acceptMentionSelection()) {
+    event.preventDefault();
+  } else if (event.key === 'Escape') {
+    $('mentionSuggestions').classList.add('hidden');
+  }
+});
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.addEventListener('visibilitychange', () => {
+  showPendingMentions();
+});
+document.addEventListener('fullscreenchange', showPendingMentions);
+document.addEventListener('webkitfullscreenchange', showPendingMentions);
 
 const inviteCode = new URLSearchParams(location.search).get('room');
 if (inviteCode) {
