@@ -35,6 +35,8 @@ const state = {
   pendingMentions: [],
   toastTimer: null,
   localStream: null,
+  mediaIceServers: null,
+  mediaIceServersExpiresAt: 0,
   mediaPeers: new Map(),
   mediaTiles: new Map(),
   mediaBusy: false,
@@ -44,7 +46,42 @@ const state = {
 
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_MEDIA_PARTICIPANTS = 5;
-const MEDIA_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const METERED_TURN_SECRET = 'openrelayprojectsecret';
+
+async function getMediaIceServers() {
+  if (state.mediaIceServers && state.mediaIceServersExpiresAt > Date.now() + 5 * 60 * 1000) return state.mediaIceServers;
+  const fallback = [{ urls: 'stun:stun.relay.metered.ca:80' }];
+  try {
+    const expiresAt = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+    const username = expiresAt + ':' + state.sessionId;
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(METERED_TURN_SECRET),
+      { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'],
+    );
+    const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(username));
+    const credential = btoa(String.fromCharCode(...new Uint8Array(signature)));
+    state.mediaIceServers = [
+      ...fallback,
+      {
+        urls: [
+          'turn:staticauth.openrelay.metered.ca:80?transport=udp',
+          'turn:staticauth.openrelay.metered.ca:80?transport=tcp',
+          'turn:staticauth.openrelay.metered.ca:443?transport=udp',
+          'turn:staticauth.openrelay.metered.ca:443?transport=tcp',
+          'turns:staticauth.openrelay.metered.ca:443?transport=tcp',
+        ],
+        username,
+        credential,
+      },
+    ];
+    state.mediaIceServersExpiresAt = expiresAt * 1000;
+  } catch {
+    // Keep direct WebRTC available if Web Crypto is unavailable for an unusual browser.
+    state.mediaIceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    state.mediaIceServersExpiresAt = Date.now() + 60 * 60 * 1000;
+  }
+  return state.mediaIceServers;
+}
 
 function setTab(tab) {
   $('createTab').classList.toggle('active', tab === 'create');
@@ -476,8 +513,11 @@ function updateMediaControls() {
   }
 
   const status = $('mediaStatus');
+  const reconnectButton = $('mediaReconnectButton');
+  if (reconnectButton) reconnectButton.classList.toggle('hidden', !Array.from(state.mediaPeers.values())
+    .some(peer => ['failed', 'disconnected'].includes(peer.pc.connectionState)));
   if (status) {
-    if (state.mediaBusy) status.textContent = 'Waiting for device permission…';
+    if (state.mediaBusy) status.textContent = 'Preparing call and requesting device permission…';
     else if (!hasLocalMedia()) status.textContent = 'Your microphone and camera stay off until you choose to join.';
     else {
       const connected = Array.from(state.mediaPeers.values()).filter(peer => peer.pc.connectionState === 'connected').length;
@@ -504,6 +544,8 @@ async function joinMedia(kind) {
   const requestChannel = state.channel;
   updateMediaControls();
   try {
+    state.mediaIceServers = await getMediaIceServers();
+    if (requestId !== state.mediaRequestId || !state.connected || state.channel !== requestChannel) return;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: kind === 'audio' ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
       video: kind === 'video' ? { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } } : false,
@@ -556,6 +598,32 @@ function toggleMediaTrack(kind) {
   renderMediaParticipants();
   updateMediaControls();
   trackPresence();
+}
+
+function retryMediaConnections() {
+  const failedPeers = Array.from(state.mediaPeers.entries())
+    .filter(([, peer]) => peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'disconnected');
+  if (!failedPeers.length) return;
+  failedPeers.forEach(([sessionId, peer]) => {
+    peer.restartAttempted = false;
+    requestMediaIceRestart(sessionId);
+  });
+  toast('Retrying the voice and video connection…');
+}
+
+function requestMediaIceRestart(remoteSessionId) {
+  const peer = state.mediaPeers.get(remoteSessionId);
+  if (!peer || peer.restartAttempted) return;
+  peer.restartAttempted = true;
+  if (state.sessionId.localeCompare(remoteSessionId) < 0) {
+    try { peer.pc.restartIce(); } catch {}
+  } else {
+    broadcast('rtc-negotiate', {
+      fromSessionId: state.sessionId,
+      toSessionId: remoteSessionId,
+      iceRestart: true,
+    });
+  }
 }
 
 async function leaveMedia() {
@@ -661,7 +729,8 @@ function renderMediaParticipants() {
     if (local) {
       tile.status.textContent = [kinds.audio ? (state.localStream.getAudioTracks().some(track => track.enabled) ? 'Mic on' : 'Mic muted') : '', kinds.video ? (videoTrack?.enabled ? 'Camera on' : 'Camera off') : ''].filter(Boolean).join(' · ');
     } else if (!peer) tile.status.textContent = 'Connecting…';
-    else if (peer.pc.connectionState === 'failed') tile.status.textContent = 'Network could not connect';
+    else if (peer.pc.connectionState === 'failed') tile.status.textContent = 'Could not connect · retry below';
+    else if (peer.pc.connectionState === 'disconnected') tile.status.textContent = 'Reconnecting…';
     else if (peer.pc.connectionState === 'connected') tile.status.textContent = [person.media.audio ? (person.media.audioEnabled ? 'Voice' : 'Muted') : '', person.media.video ? (person.media.videoEnabled ? 'Camera' : 'Camera off') : ''].filter(Boolean).join(' · ');
     else tile.status.textContent = 'Connecting…';
     grid.append(tile.root);
@@ -708,7 +777,7 @@ function syncMediaPeers() {
 
 function createMediaPeer(remoteSessionId) {
   if (typeof RTCPeerConnection !== 'function' || state.mediaPeers.has(remoteSessionId)) return state.mediaPeers.get(remoteSessionId);
-  const pc = new RTCPeerConnection({ iceServers: MEDIA_ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: state.mediaIceServers || [{ urls: 'stun:stun.l.google.com:19302' }] });
   const peer = { pc, remoteStream: new MediaStream(), makingOffer: false, offerAgain: false, pendingIce: [] };
   state.mediaPeers.set(remoteSessionId, peer);
   state.localStream?.getTracks().filter(track => track.readyState === 'live').forEach(track => pc.addTrack(track, state.localStream));
@@ -731,9 +800,13 @@ function createMediaPeer(remoteSessionId) {
     renderMediaParticipants();
   };
   pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') peer.restartAttempted = false;
     renderMediaParticipants();
     updateMediaControls();
-    if (pc.connectionState === 'failed') toast('A voice or video connection was blocked by a network. Watching and chat are unaffected.');
+    if (pc.connectionState === 'failed') {
+      requestMediaIceRestart(remoteSessionId);
+      toast('The connection dropped. Trying the free network relay…');
+    }
   };
   pc.onnegotiationneeded = () => requestPeerNegotiation(remoteSessionId);
   return peer;
@@ -807,7 +880,13 @@ async function handleRtcSignal(kind, payload) {
     && (person.media.audio || person.media.video));
   if (!remote) return;
   if (kind === 'negotiate') {
-    if (state.sessionId.localeCompare(remote.sessionId) < 0) await makePeerOffer(remote.sessionId);
+    if (state.sessionId.localeCompare(remote.sessionId) < 0) {
+      if (payload.iceRestart) {
+        const peer = createMediaPeer(remote.sessionId);
+        if (peer) peer.restartAttempted = true;
+        try { peer?.pc.restartIce(); } catch {}
+      } else await makePeerOffer(remote.sessionId);
+    }
     return;
   }
   const peer = createMediaPeer(remote.sessionId);
